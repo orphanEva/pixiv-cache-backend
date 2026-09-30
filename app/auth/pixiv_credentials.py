@@ -239,16 +239,30 @@ class PixivCredentialManager:
                 await browser.close()
 
     async def _challenge_detected(self, page: Any) -> bool:
+        """Detect an active human-verification challenge, not merely loaded JS."""
+        selectors = (
+            'iframe[src*="captcha"]',
+            'iframe[src*="challenge"]',
+            '.g-recaptcha',
+            '.h-captcha',
+            '[data-sitekey]',
+        )
         try:
-            content = (await page.content()).lower()
-        except Exception:
-            content = ""
-        markers = ("recaptcha", "hcaptcha", "captcha", "cloudflare challenge")
-        if any(marker in content for marker in markers):
-            return True
-        try:
-            frames = [frame.url.lower() for frame in page.frames]
-            return any("captcha" in url or "challenge" in url for url in frames)
+            for selector in selectors:
+                locator = page.locator(selector)
+                count = await locator.count()
+                for index in range(min(count, 3)):
+                    try:
+                        if await locator.nth(index).is_visible():
+                            return True
+                    except Exception:
+                        continue
+            frames = [frame.url.lower() for frame in page.frames if frame.url]
+            return any(
+                ("captcha" in url or "challenge" in url)
+                and url not in ("about:blank", "")
+                for url in frames
+            )
         except Exception:
             return False
 
