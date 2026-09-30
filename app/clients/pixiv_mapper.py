@@ -7,7 +7,7 @@ from typing import Any
 
 from app.core.errors import PixivNotFoundError, PixivRestrictedError
 from app.models.work import WorkType
-from app.schemas.pixiv import RemoteAsset, RemoteSnapshot
+from app.schemas.pixiv import RemoteAsset, RemoteSnapshot, UgoiraFrame
 
 
 def to_dict(value: Any) -> Any:
@@ -159,3 +159,38 @@ def build_novel_snapshot(detail_payload: Any, text_payload: Any, pixiv_id: int) 
         text_content=text,
         version_token=version_token(fingerprint),
     )
+
+
+def apply_ugoira_metadata(snapshot: RemoteSnapshot, payload: Any) -> RemoteSnapshot:
+    """Attach Pixiv ugoira ZIP/frames and include them in the version fingerprint."""
+    data = to_dict(payload)
+    if not isinstance(data, dict):
+        raise PixivRestrictedError(f"Pixiv ugoira {snapshot.pixiv_id} metadata is unavailable")
+    meta = data.get("ugoira_metadata") or data
+    if not isinstance(meta, dict):
+        raise PixivRestrictedError(f"Pixiv ugoira {snapshot.pixiv_id} metadata is unavailable")
+
+    zip_urls = meta.get("zip_urls") or {}
+    zip_url = zip_urls.get("medium") or zip_urls.get("original")
+    raw_frames = meta.get("frames") or []
+    frames = [
+        UgoiraFrame(file=str(item.get("file")), delay=int(item.get("delay") or 0))
+        for item in raw_frames
+        if isinstance(item, dict) and item.get("file") and int(item.get("delay") or 0) > 0
+    ]
+    if not zip_url or not frames:
+        raise PixivRestrictedError(f"Pixiv ugoira {snapshot.pixiv_id} has no ZIP/frames metadata")
+
+    snapshot.ugoira_zip_url = str(zip_url)
+    snapshot.ugoira_frames = frames
+    snapshot.metadata = dict(snapshot.metadata)
+    snapshot.metadata["ugoira_metadata"] = {
+        "zip_urls": {"medium": str(zip_url)},
+        "frames": [frame.model_dump() for frame in frames],
+    }
+    snapshot.version_token = version_token({
+        "base": snapshot.version_token,
+        "ugoira_zip_url": snapshot.ugoira_zip_url,
+        "frames": [frame.model_dump() for frame in frames],
+    })
+    return snapshot

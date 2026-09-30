@@ -5,9 +5,10 @@ import time
 from pixivpy3 import AppPixivAPI
 
 from app.clients.base import PixivClient
-from app.clients.pixiv_mapper import build_illust_snapshot, build_novel_snapshot
+from app.clients.pixiv_mapper import apply_ugoira_metadata, build_illust_snapshot, build_novel_snapshot
 from app.core.config import get_settings
 from app.core.errors import PixivAuthError, PixivNotFoundError, PixivRemoteError, PixivRestrictedError, PixivUnavailableError
+from app.models.work import WorkType
 from app.schemas.pixiv import RemoteSnapshot
 
 
@@ -55,7 +56,11 @@ class PixivPyClient(PixivClient):
 
     async def get_illust_snapshot(self, pixiv_id: int) -> RemoteSnapshot:
         result = await self._call(self.api.illust_detail, pixiv_id)
-        return build_illust_snapshot(getattr(result, "illust", None), pixiv_id)
+        snapshot = build_illust_snapshot(getattr(result, "illust", None), pixiv_id)
+        if snapshot.work_type == WorkType.UGOIRA:
+            metadata = await self._call(self.api.ugoira_metadata, pixiv_id)
+            snapshot = apply_ugoira_metadata(snapshot, metadata)
+        return snapshot
 
     async def get_novel_snapshot(self, pixiv_id: int) -> RemoteSnapshot:
         detail_result, text_result = await asyncio.gather(
