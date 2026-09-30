@@ -10,6 +10,11 @@ class RemoteAsset(BaseModel):
     filename: str
 
 
+class UgoiraFrame(BaseModel):
+    file: str
+    delay: int
+
+
 class RemoteSnapshot(BaseModel):
     pixiv_id: int
     work_type: WorkType
@@ -27,11 +32,14 @@ class RemoteSnapshot(BaseModel):
     metadata: dict = Field(default_factory=dict)
     assets: list[RemoteAsset] = Field(default_factory=list)
     text_content: str | None = None
+    ugoira_zip_url: str | None = None
+    ugoira_frames: list[UgoiraFrame] = Field(default_factory=list)
     version_token: str
 
 
 class AssetResponse(BaseModel):
     page_index: int
+    file_type: str = "image"
     local_path: str
     sha256: str
     size_bytes: int

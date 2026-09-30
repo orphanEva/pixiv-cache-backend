@@ -41,10 +41,6 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def asset_file_type(work_type: WorkType) -> str:
-    return "novel_txt" if work_type == WorkType.NOVEL else "image"
-
-
 class CacheService:
     def __init__(self, session: AsyncSession, client: PixivClient, redis_client=None):
         self.session = session
@@ -162,7 +158,11 @@ class CacheService:
                 work.caption = snapshot.caption
                 work.author_id = str(snapshot.author_id or 0)
                 work.author_name = (snapshot.author_name or "")[:128]
-                work.page_count = max(1, len(snapshot.assets)) if snapshot.work_type != WorkType.NOVEL else 1
+                work.page_count = (
+                    len(snapshot.ugoira_frames)
+                    if snapshot.work_type == WorkType.UGOIRA
+                    else (max(1, len(snapshot.assets)) if snapshot.work_type != WorkType.NOVEL else 1)
+                )
                 work.x_restrict = snapshot.x_restrict
                 work.is_ai = snapshot.is_ai
                 work.series_id = snapshot.series_id
@@ -191,7 +191,7 @@ class CacheService:
                 for item in assets:
                     self.session.add(PixivAsset(
                         version_id=version.id, page_index=item["page_index"],
-                        file_type=asset_file_type(snapshot.work_type),
+                        file_type=item.get("file_type", "novel_txt" if snapshot.work_type == WorkType.NOVEL else "image"),
                         local_path=item["local_path"], sha256=item["sha256"],
                         size_bytes=item["size_bytes"], remote_url=item["remote_url"],
                     ))
@@ -200,7 +200,7 @@ class CacheService:
                 for item in assets:
                     self.session.add(CurrentFile(
                         work_id=str(pixiv_id), page_index=item["page_index"],
-                        file_type=asset_file_type(snapshot.work_type),
+                        file_type=item.get("file_type", "novel_txt" if snapshot.work_type == WorkType.NOVEL else "image"),
                         local_path=item["local_path"], sha256=item["sha256"],
                         size_bytes=item["size_bytes"],
                     ))
@@ -288,7 +288,8 @@ class CacheService:
     def _to_response(self, work: PixivWork, source: str, selected_version: PixivVersion | None = None) -> WorkResponse:
         version = selected_version or next(v for v in work.versions if v.version_no == work.current_version_no)
         assets = [
-            AssetResponse(page_index=a.page_index, local_path=self._public_path(a.local_path),
+            AssetResponse(page_index=a.page_index, file_type=a.file_type,
+                          local_path=self._public_path(a.local_path),
                           sha256=a.sha256 or "", size_bytes=a.size_bytes)
             for a in sorted(version.assets, key=lambda a: a.page_index)
         ]
@@ -309,7 +310,8 @@ class CacheService:
             version=version.version_no, version_token=version.version_token,
             remote_updated_at=version.remote_updated_at, created_at=version.created_at,
             assets=[
-                AssetResponse(page_index=a.page_index, local_path=self._public_path(a.local_path),
+                AssetResponse(page_index=a.page_index, file_type=a.file_type,
+                              local_path=self._public_path(a.local_path),
                               sha256=a.sha256 or "", size_bytes=a.size_bytes)
                 for a in sorted(version.assets, key=lambda a: a.page_index)
             ],
