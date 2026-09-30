@@ -14,12 +14,9 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - name: Install
-        run: pip install -e '.[dev]'
-      - name: Compile
-        run: python -m compileall -q app tests
-      - name: Unit tests
-        run: pytest -q --ignore=tests/test_mysql_integration.py
+      - run: pip install -e '.[dev]'
+      - run: python -m compileall -q app tests scripts
+      - run: pytest -q --ignore=tests/test_mysql_integration.py
 
   integration:
     runs-on: ubuntu-latest
@@ -27,7 +24,6 @@ jobs:
       mysql:
         image: mysql:8.4
         env:
-          MYSQL_DATABASE: pixiv_cache
           MYSQL_ROOT_PASSWORD: test-in-ci-only
         ports: ['3306:3306']
         options: >-
@@ -40,8 +36,9 @@ jobs:
           --health-cmd="redis-cli ping" --health-interval=5s
           --health-timeout=3s --health-retries=15
     env:
-      DATABASE_URL: mysql+asyncmy://root:test-in-ci-only@127.0.0.1:3306/pixiv_cache?charset=utf8mb4
+      DATABASE_URL: mysql+asyncmy://root:test-in-ci-only@127.0.0.1:3306/pixiv_archive?charset=utf8mb4
       REDIS_URL: redis://127.0.0.1:6379/0
+      CI_MYSQL_ROOT_PASSWORD: test-in-ci-only
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -49,5 +46,7 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -e '.[dev]'
-      - run: alembic upgrade head
+      # Deliberately explicit: application startup NEVER runs DDL.
+      - name: Initialize disposable CI MySQL from manual SQL
+        run: python scripts/init_ci_schema.py
       - run: pytest -q tests/test_mysql_integration.py
