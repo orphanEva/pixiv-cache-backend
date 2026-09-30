@@ -10,6 +10,8 @@ def test_seven_table_contract():
         assert "CREATE TABLE " + table in sql
     assert "DROP TABLE" not in "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
     assert "remote_update_at DATETIME NULL" in sql
+    for file_type in ("ugoira_zip", "ugoira_meta", "ugoira_mp4"):
+        assert f"'{file_type}'" in sql
 
 
 def test_app_never_runs_migrations_on_start():

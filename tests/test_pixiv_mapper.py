@@ -1,4 +1,4 @@
-from app.clients.pixiv_mapper import build_illust_snapshot, build_novel_snapshot, to_dict
+from app.clients.pixiv_mapper import apply_ugoira_metadata, build_illust_snapshot, build_novel_snapshot, to_dict
 from app.models.work import WorkType
 
 
@@ -62,3 +62,27 @@ def test_novel_mapper_uses_novel_text_and_changes_token_with_body():
     assert first.work_type == WorkType.NOVEL
     assert first.text_content == "hello"
     assert first.version_token != second.version_token
+
+
+def test_ugoira_metadata_adds_zip_frames_and_changes_fingerprint():
+    snapshot = build_illust_snapshot({
+        "id": 30,
+        "title": "animated",
+        "type": "ugoira",
+        "user": {"id": 9, "name": "animator"},
+        "meta_single_page": {"original_image_url": "https://i.pximg.net/cover.jpg"},
+    }, 30)
+    before = snapshot.version_token
+    enriched = apply_ugoira_metadata(snapshot, {
+        "ugoira_metadata": {
+            "zip_urls": {"medium": "https://i.pximg.net/ugoira.zip"},
+            "frames": [
+                {"file": "000000.jpg", "delay": 100},
+                {"file": "000001.jpg", "delay": 200},
+            ],
+        }
+    })
+    assert enriched.work_type == WorkType.UGOIRA
+    assert enriched.ugoira_zip_url.endswith("ugoira.zip")
+    assert [f.delay for f in enriched.ugoira_frames] == [100, 200]
+    assert enriched.version_token != before
