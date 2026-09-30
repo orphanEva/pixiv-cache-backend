@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from datetime import datetime
 from pydantic import BaseModel, Field
 from app.models.work import WorkStatus, WorkType
@@ -15,6 +14,12 @@ class RemoteSnapshot(BaseModel):
     pixiv_id: int
     work_type: WorkType
     title: str = ""
+    caption: str | None = None
+    tags: list[dict] = Field(default_factory=list)
+    x_restrict: int = 0
+    is_ai: bool = False
+    series_id: str | None = None
+    series_order: int | None = None
     author_id: int | None = None
     author_name: str | None = None
     created_at: datetime | None = None
