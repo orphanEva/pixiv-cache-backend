@@ -150,10 +150,11 @@ class CacheService:
                 storage_path, assets = await self.storage.materialize(snapshot, new_no)
                 now = now_utc()
                 meta = snapshot.metadata
+                # Series must exist BEFORE any pending work can autoflush.
+                await self._sync_series(snapshot)
                 if work is None:
                     work = PixivWork(id=str(pixiv_id), work_type=snapshot.work_type)
                     self.session.add(work)
-                await self._sync_series(snapshot)
                 work.status = WorkStatus.ACTIVE
                 work.status_reason = None
                 work.work_type = snapshot.work_type
@@ -244,13 +245,17 @@ class CacheService:
             return
         # A separately committed tag dictionary survives individual work updates;
         # relations are rebuilt transactionally against the current snapshot.
+        seen_names: set[str] = set()
         for tag in tags:
             name = str(tag.get("name") or "").strip()[:128]
+            if name in seen_names:
+                continue
+            seen_names.add(name)
             if not name:
                 continue
             tag_id = (await self.session.execute(select(Tag.id).where(Tag.name == name))).scalar_one_or_none()
             if tag_id is None:
-                record = Tag(name=name, translated_name=(tag.get("translated_name") or None))
+                record = Tag(name=name, translated_name=(tag.get("translated_name") or None)[:128] if tag.get("translated_name") else None)
                 self.session.add(record)
                 await self.session.flush()
                 tag_id = record.id
