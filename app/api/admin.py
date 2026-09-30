@@ -37,6 +37,6 @@ async def cache_detail(kind: WorkType, pixiv_id: int, session: AsyncSession = De
 async def force_refresh(kind: WorkType, pixiv_id: int, session: AsyncSession = Depends(get_session)):
     service = CacheService(session, get_client())
     try:
-        return await service._get(pixiv_id, kind, refresh=True)
+        return await service._get(pixiv_id, kind, refresh=True, bypass_ttl=True)
     except PixivRemoteError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc

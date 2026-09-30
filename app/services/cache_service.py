@@ -60,14 +60,14 @@ class CacheService:
             raise PixivNotFoundError(f"Version {version_no} not found for {work_type.value} {pixiv_id}")
         return self._to_response(local, "local-history", selected_version=version)
 
-    async def _get(self, pixiv_id: int, work_type: WorkType, refresh: bool) -> WorkResponse:
+    async def _get(self, pixiv_id: int, work_type: WorkType, refresh: bool, bypass_ttl: bool = False) -> WorkResponse:
         local = await self._load(pixiv_id, work_type)
         if local and not refresh:
             self._require_local_access(local)
             logger.info("cache_hit_no_refresh", extra={"pixiv_id": pixiv_id, "work_type": work_type.value, "source": "local"})
             return self._to_response(local, "local")
 
-        if local and cache_read_allowed(local.status.value) and self.settings.remote_check_ttl_seconds > 0:
+        if local and not bypass_ttl and cache_read_allowed(local.status.value) and self.settings.remote_check_ttl_seconds > 0:
             age = (datetime.now(timezone.utc) - self._as_utc(local.last_checked_at)).total_seconds()
             if age < self.settings.remote_check_ttl_seconds:
                 return self._to_response(local, "local-recently-validated")
