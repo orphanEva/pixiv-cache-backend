@@ -50,3 +50,13 @@ jobs:
       - name: Initialize disposable CI MySQL from manual SQL
         run: python scripts/init_ci_schema.py
       - run: pytest -q tests/test_mysql_integration.py
+
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build -t pixiv-cache-backend:ci .
+      - name: Verify FFmpeg exists in image
+        run: docker run --rm --entrypoint ffmpeg pixiv-cache-backend:ci -version

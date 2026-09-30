@@ -86,3 +86,23 @@ def test_ugoira_metadata_adds_zip_frames_and_changes_fingerprint():
     assert enriched.ugoira_zip_url.endswith("ugoira.zip")
     assert [f.delay for f in enriched.ugoira_frames] == [100, 200]
     assert enriched.version_token != before
+
+
+def test_ugoira_metadata_prefers_original_zip_when_available():
+    snapshot = build_illust_snapshot({
+        "id": 31,
+        "title": "animated-original",
+        "type": "ugoira",
+        "user": {},
+        "meta_single_page": {"original_image_url": "https://i.pximg.net/cover.jpg"},
+    }, 31)
+    enriched = apply_ugoira_metadata(snapshot, {
+        "ugoira_metadata": {
+            "zip_urls": {
+                "medium": "https://i.pximg.net/medium.zip",
+                "original": "https://i.pximg.net/original.zip",
+            },
+            "frames": [{"file": "000000.jpg", "delay": 100}],
+        }
+    })
+    assert enriched.ugoira_zip_url.endswith("original.zip")

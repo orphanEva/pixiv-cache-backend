@@ -36,3 +36,16 @@ Because production does not run migrations automatically, initialize a new
 empty database from the current `sql/pixiv_archive.sql`. If the database was
 already initialized with an older DDL, apply a reviewed manual ALTER instead
 of recreating tables.
+
+
+## Original-quality preference
+
+The Pixiv App API exposed through PixivPy commonly supplies only the
+`medium` ZIP. The backend therefore makes a best-effort request to Pixiv's
+public Web Ugoira metadata endpoint and prefers `originalSrc` when available.
+If that request fails, is blocked, or does not expose an original URL, archival
+falls back to the App API ZIP instead of failing the work. Set
+`UGOIRA_PREFER_ORIGINAL=false` to disable this lookup.
+
+The chosen ZIP URL is part of the version fingerprint, so a later switch from
+a medium ZIP to an original ZIP is recorded as a new immutable version.

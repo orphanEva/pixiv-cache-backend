@@ -171,7 +171,7 @@ def apply_ugoira_metadata(snapshot: RemoteSnapshot, payload: Any) -> RemoteSnaps
         raise PixivRestrictedError(f"Pixiv ugoira {snapshot.pixiv_id} metadata is unavailable")
 
     zip_urls = meta.get("zip_urls") or {}
-    zip_url = zip_urls.get("medium") or zip_urls.get("original")
+    zip_url = zip_urls.get("original") or zip_urls.get("medium")
     raw_frames = meta.get("frames") or []
     frames = [
         UgoiraFrame(file=str(item.get("file")), delay=int(item.get("delay") or 0))
