@@ -1,52 +1,41 @@
-# External MySQL: manual initialization only
+# pixiv_archive: manual MySQL initialization
 
-The application **never creates databases or tables** on startup.
-Docker Compose starts only the API and Redis; supply your own MySQL 8.0+ instance.
-The schema is in [../sql/mysql-schema.sql](../sql/mysql-schema.sql).
+**New, empty MySQL 8.0+ database only.** This project does not create any
+production database, table, or migration record at runtime.
 
-## 1. Initialize MySQL manually
-
-Connect to your MySQL instance as an authorized database administrator,
-open `sql/mysql-schema.sql` in Navicat/DataGrip, and run the full script.
-It creates the `pixiv_cache` database and its three application tables.
-Run it **once** on a new instance; back up existing data before applying
-future manual schema changes.
-
-Create a dedicated `pixiv` database user yourself and grant it the minimum
-needed runtime permissions (`SELECT`, `INSERT`, `UPDATE`, `DELETE` on
-`pixiv_cache.*`). Do not give the API user `CREATE`, `ALTER`, `DROP`
-or other schema-migration permissions.
-
-SQL example (replace credentials before running, do not commit passwords):
+1. Review [sql/pixiv_archive.sql](../sql/pixiv_archive.sql). It is the new
+   canonical DDL based on the supplied seven-table design with additions
+   needed for reliable immutable version history.
+2. Open your MySQL administrator client (Navicat/DataGrip/mysql CLI),
+   and manually run the SQL **once on a new database**.
+3. Create your own restricted application user. For example, update the
+   password and allowed host below:
 
 ```sql
-CREATE USER 'pixiv'@'%' IDENTIFIED BY 'YOUR_OWN_PASSWORD';
-GRANT SELECT, INSERT, UPDATE, DELETE ON pixiv_cache.* TO 'pixiv'@'%';
+CREATE USER 'pixiv'@'YOUR_API_HOST' IDENTIFIED BY 'YOUR_OWN_PASSWORD';
+GRANT SELECT, INSERT, UPDATE, DELETE ON pixiv_archive.* TO 'pixiv'@'YOUR_API_HOST';
 ```
 
-Restrict allowed hosts to your real deployment network whenever possible
-rather than using `%`. Ensure that MySQL accepts connections from the
-API container and is protected by a firewall.
+4. Set `DATABASE_URL` in the private `.env`, e.g.
+   `mysql+asyncmy://pixiv:PASSWORD@MYSQL_HOST:3306/pixiv_archive?charset=utf8mb4`.
+   URL-encode reserved password characters; do not commit your `.env`.
+5. Supply a private Pixiv refresh token and an API key of at least 32
+   random characters; start with `docker compose up -d --build`.
+6. Verify `curl http://127.0.0.1:18081/health/ready` reports
+   MySQL and Redis connectivity.
 
-## 2. Configure and start
+## Existing installations or imported data
 
-```sh
-cp .env.example .env
-# Edit DATABASE_URL to point to your already-created database.
-# Set API_KEY (>= 32 random characters) and PIXIV_REFRESH_TOKEN locally.
-docker compose config --quiet
-docker compose up -d --build
-curl -sS http://127.0.0.1:18081/health/ready
-```
+Do NOT execute the new-install script over an existing
+`pixiv_archive` or `pixiv_cache` database that contains data, and
+do not execute the original dump with `DROP TABLE IF EXISTS`.
+The original dump had no reliable `version_token`, could require a
+nonexistent `remote_update_at`, and recorded only prior versions in
+`work_history`. This application requires **all** version records,
+including the current one, with registered media paths. Migrating
+existing rows and files requires a separately reviewed and verified
+data/file migration, with a full backup and rollback plan.
 
-Expected: `{"status":"ok","checks":{"mysql":true,"redis":true}}`.
-If the schema is missing, requests depending on its tables will fail: the
-application will NOT try to create or repair it automatically.
-
-## Notes
-
-- Do not execute `alembic upgrade head` on deployed systems.
-- CI may use an ephemeral throwaway database to test Alembic migration
-  correctness; that is separate from your deployed database initialization.
-- On an existing populated database, inspect the DDL and migrate carefully
-  rather than running a `CREATE` script blindly.
+The API account needs only DML privileges. Production containers do
+not execute Alembic or run `CREATE TABLE`. CI initialization is
+intentionally restricted to the disposable GitHub Actions MySQL.
