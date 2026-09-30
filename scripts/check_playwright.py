@@ -6,7 +6,7 @@ async def main() -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
         try:
-            print(await browser.version())
+            print(browser.version)
         finally:
             await browser.close()
 
