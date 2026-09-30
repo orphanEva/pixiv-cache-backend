@@ -9,7 +9,7 @@ from sqlalchemy import (
     BigInteger, Boolean, DateTime, Enum, ForeignKey, Index, Integer, JSON,
     String, Text, UniqueConstraint, text
 )
-from sqlalchemy.dialects.mysql import MEDIUMTEXT
+from sqlalchemy.dialects.mysql import MEDIUMTEXT, INTEGER as MYSQL_INTEGER, BIGINT as MYSQL_BIGINT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -54,7 +54,7 @@ class Series(Base):
 
 class Tag(Base):
     __tablename__ = "tags"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer().with_variant(MYSQL_INTEGER(unsigned=True), 'mysql'), primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     translated_name: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
@@ -77,7 +77,7 @@ class PixivWork(Base):
     page_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     remote_created_at: Mapped[datetime | None] = mapped_column("remote_create_at", DateTime)
     remote_updated_at: Mapped[datetime | None] = mapped_column("remote_update_at", DateTime)
-    novel_content: Mapped[str | None] = mapped_column(MEDIUMTEXT)
+    novel_content: Mapped[str | None] = mapped_column(Text().with_variant(MEDIUMTEXT, 'mysql'))
     metadata_json: Mapped[dict | None] = mapped_column("raw_meta", JSON)
     version_token: Mapped[str] = mapped_column(String(64), nullable=False)
     current_version_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -100,7 +100,7 @@ class PixivWork(Base):
 
 class PixivVersion(Base):
     __tablename__ = "work_history"
-    id: Mapped[int] = mapped_column("history_id", BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column("history_id", BigInteger().with_variant(MYSQL_BIGINT(unsigned=True), "mysql"), primary_key=True, autoincrement=True)
     work_id: Mapped[str] = mapped_column(String(32), ForeignKey("works.id", ondelete="CASCADE"), nullable=False)
     version_no: Mapped[int] = mapped_column("version_num", Integer, nullable=False)
     version_token: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -120,7 +120,7 @@ class PixivVersion(Base):
 class PixivAsset(Base):
     __tablename__ = "work_history_files"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    version_id: Mapped[int] = mapped_column("history_id", BigInteger, ForeignKey("work_history.history_id", ondelete="CASCADE"), nullable=False)
+    version_id: Mapped[int] = mapped_column("history_id", BigInteger().with_variant(MYSQL_BIGINT(unsigned=True), "mysql"), ForeignKey("work_history.history_id", ondelete="CASCADE"), nullable=False)
     page_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     file_type: Mapped[str] = mapped_column(String(24), nullable=False, default="image")
     local_path: Mapped[str] = mapped_column("backup_path", String(1000), nullable=False)
@@ -147,5 +147,5 @@ class CurrentFile(Base):
 class WorkTagRelation(Base):
     __tablename__ = "work_tag_relation"
     work_id: Mapped[str] = mapped_column(String(32), ForeignKey("works.id", ondelete="CASCADE"), primary_key=True)
-    tag_id: Mapped[int] = mapped_column(Integer, ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True)
+    tag_id: Mapped[int] = mapped_column(Integer().with_variant(MYSQL_INTEGER(unsigned=True), "mysql"), ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))

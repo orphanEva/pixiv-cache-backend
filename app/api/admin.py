@@ -24,7 +24,7 @@ async def cache_status(session: AsyncSession = Depends(get_session)):
 @router.get("/{kind}/{pixiv_id}")
 async def cache_detail(kind: WorkType, pixiv_id: int, session: AsyncSession = Depends(get_session)):
     work = (await session.execute(
-        select(PixivWork).where(PixivWork.work_type == kind, PixivWork.pixiv_id == pixiv_id)
+        select(PixivWork).where(PixivWork.work_type == kind, PixivWork.id == str(pixiv_id))
     )).scalar_one_or_none()
     if work is None:
         raise HTTPException(404, "Cache entry not found")

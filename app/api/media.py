@@ -19,7 +19,7 @@ async def get_media(kind: WorkType, pixiv_id: int, version_no: int, filename: st
         select(PixivAsset.local_path, PixivWork.status)
         .join(PixivVersion, PixivAsset.version_id == PixivVersion.id)
         .join(PixivWork, PixivVersion.work_id == PixivWork.id)
-        .where(PixivWork.work_type == kind, PixivWork.pixiv_id == pixiv_id,
+        .where(PixivWork.work_type == kind, PixivWork.id == str(pixiv_id),
                PixivVersion.version_no == version_no))
     root = get_settings().storage_root.resolve()
     for local_path, status in result.all():

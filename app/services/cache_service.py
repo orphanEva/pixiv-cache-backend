@@ -239,9 +239,9 @@ class CacheService:
             ))
 
     async def _sync_tags(self, work_id: str, tags: list[dict]) -> None:
+        await self.session.execute(delete(WorkTagRelation).where(WorkTagRelation.work_id == work_id))
         if not tags:
             return
-        await self.session.execute(delete(WorkTagRelation).where(WorkTagRelation.work_id == work_id))
         # A separately committed tag dictionary survives individual work updates;
         # relations are rebuilt transactionally against the current snapshot.
         for tag in tags:

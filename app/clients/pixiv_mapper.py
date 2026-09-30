@@ -93,9 +93,19 @@ def build_illust_snapshot(payload: Any, pixiv_id: int) -> RemoteSnapshot:
         "assets": [a.model_dump() for a in assets],
         "updated_at": update_dt,
     }
+    raw_tags = illust.get("tags") or []
+    if isinstance(raw_tags, dict):
+        raw_tags = raw_tags.get("tags") or []
+    tags = [{"name": t.get("name", ""), "translated_name": t.get("translated_name")} for t in raw_tags if isinstance(t, dict)]
+    kind = illust.get("type") or "illust"
+    work_type = WorkType(kind) if kind in ("illust", "manga", "ugoira") else WorkType.ILLUST
     return RemoteSnapshot(
         pixiv_id=pixiv_id,
-        work_type=WorkType.ILLUST,
+        work_type=work_type,
+        caption=illust.get("caption"),
+        tags=tags,
+        x_restrict=int(illust.get("x_restrict") or 0),
+        is_ai=int(illust.get("ai_type") or 0) == 2,
         title=illust.get("title") or "",
         author_id=user.get("id"),
         author_name=user.get("name"),
@@ -127,9 +137,19 @@ def build_novel_snapshot(detail_payload: Any, text_payload: Any, pixiv_id: int) 
         "text": text,
         "updated_at": update_dt,
     }
+    raw_tags = novel.get("tags") or []
+    if isinstance(raw_tags, dict):
+        raw_tags = raw_tags.get("tags") or []
+    tags = [{"name": t.get("name", ""), "translated_name": t.get("translated_name")} for t in raw_tags if isinstance(t, dict)]
+    series = novel.get("series") if isinstance(novel.get("series"), dict) else {}
     return RemoteSnapshot(
         pixiv_id=pixiv_id,
         work_type=WorkType.NOVEL,
+        caption=novel.get("caption"),
+        tags=tags,
+        x_restrict=int(novel.get("x_restrict") or 0),
+        series_id=str(series.get("id")) if series.get("id") else None,
+        series_order=series.get("order") or None,
         title=novel.get("title") or "",
         author_id=user.get("id"),
         author_name=user.get("name"),

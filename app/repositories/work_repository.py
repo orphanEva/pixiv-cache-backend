@@ -13,7 +13,7 @@ class WorkRepository:
     async def get(self, pixiv_id: int, work_type: WorkType) -> PixivWork | None:
         stmt = (
             select(PixivWork)
-            .where(PixivWork.pixiv_id == pixiv_id, PixivWork.work_type == work_type)
+            .where(PixivWork.id == str(pixiv_id), PixivWork.work_type == work_type)
             .options(selectinload(PixivWork.versions).selectinload(PixivVersion.assets))
         )
         result = await self.session.execute(stmt)
@@ -24,7 +24,7 @@ class WorkRepository:
             select(PixivVersion)
             .join(PixivWork, PixivVersion.work_id == PixivWork.id)
             .where(
-                PixivWork.pixiv_id == pixiv_id,
+                PixivWork.id == str(pixiv_id),
                 PixivWork.work_type == work_type,
                 PixivVersion.version_no == version_no,
             )
