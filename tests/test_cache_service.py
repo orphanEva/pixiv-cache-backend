@@ -42,7 +42,8 @@ class FakeSession:
     async def execute(self, statement):
         # _sync_tags and current_file updates are SQL operations; integration
         # tests exercise actual effects on MySQL. This fake tracks the pointer.
-        self.work.current_files = []
+        if "DELETE FROM work_files" in str(statement):
+            self.work.current_files = []
         return None
 
     async def flush(self): pass

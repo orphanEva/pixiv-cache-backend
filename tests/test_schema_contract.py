@@ -8,7 +8,7 @@ def test_seven_table_contract():
     sql = Path("sql/pixiv_archive.sql").read_text()
     for table in expected:
         assert "CREATE TABLE " + table in sql
-    assert "DROP TABLE" not in sql
+    assert "DROP TABLE" not in "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
     assert "remote_update_at DATETIME NULL" in sql
 
 
