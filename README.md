@@ -1,61 +1,90 @@
 # Pixiv Cache Backend
 
-FastAPI + external MySQL 8 + Redis: a versioned caching backend for
-Pixiv illustrations and novels.
+FastAPI + externally managed **MySQL 8** + Redis. Versioned, local Pixiv
+illustration and novel cache built around the seven-table `pixiv_archive` schema.
 
-## Manual database initialization (required)
+## Manual SQL initialization — no automatic DDL
 
-**No automatic database or table creation.** This project's Docker Compose
-starts only the API and Redis, **not MySQL**. Point `DATABASE_URL` to your
-existing MySQL instance.
+The API container does **not** create a database or run migrations. Docker
+Compose starts the API and Redis only. MySQL must already exist.
 
-1. Use the complete [DDL file](sql/mysql-schema.sql) to **manually** create
-   `pixiv_cache` and its three tables in MySQL.
-2. Set up an application user with CRUD permissions (not DDL permissions).
-3. Follow the [manual setup guide](docs/MANUAL_DATABASE_SETUP.md).
-4. Copy `.env.example` to `.env` and configure `DATABASE_URL`,
-   `PIXIV_REFRESH_TOKEN` and a random `API_KEY` of at least 32 characters.
-5. Run `docker compose up -d --build` then check
-   `GET http://127.0.0.1:18081/health/ready`.
+**For a brand-new empty database:** manually run
+[sql/pixiv_archive.sql](sql/pixiv_archive.sql) as a MySQL administrator, then
+create a separate low-privilege account with SELECT/INSERT/UPDATE/DELETE.
+Follow [the complete setup guide](docs/MANUAL_DATABASE_SETUP.md).
 
-Do **not** run `alembic upgrade head` on production. CI uses a separate
-ephemeral test database to exercise migration code; deployed systems do not
-perform any DDL. Database schema upgrades must be reviewed/applied manually.
+**For an existing database with data:** DO NOT run this new-install DDL or
+your old dump. Back up the original schema and media first. The old
+three-table `pixiv_cache` layout and the originally supplied seven-table
+dump are *different schemas* and need an explicit, reviewed data migration.
 
-## Business APIs
+Seven tables:
 
-All non-health endpoints require `X-API-Key`:
+- `works`: current work metadata, fingerprint, accessibility, current version
+- `series`: series metadata
+- `tags` and `work_tag_relation`: searchable current tags
+- `work_files`: pointers to files in the current version
+- `work_history`: **every** version, including the current one
+- `work_history_files`: immutable files attached to each version
+
+Files are saved to immutable `{kind}/{id}/versions/{number}/` directories.
+A new version changes `works.current_version_no` and re-points
+`work_files`; old files are *not moved or overwritten*. The remote
+`remote_update_at` field is optional. Version comparison uses a SHA-256
+fingerprint including novel text or illustration URL/metadata where available;
+a remote image replaced in place behind an unchanged URL can still be missed.
+
+The SQL accommodates manga, ugoira, series and media types, but the current
+fetching implementation exposes image/novel APIs only. A ugoira illustration
+response may include a cover; **animated frame/ZIP capture and video ingestion
+are not yet implemented**.
+
+## Start
+
+```sh
+cp .env.example .env
+# Edit DATABASE_URL for the manually initialized pixiv_archive database.
+# Set PIXIV_REFRESH_TOKEN and a strong, random API_KEY (>= 32 chars).
+docker compose config --quiet
+docker compose up -d --build
+curl -sS http://127.0.0.1:18081/health/ready
+```
+
+MySQL must allow connections from the API container and should be protected
+by a firewall. Avoid exposing API/DB ports directly on the public Internet.
+
+## APIs
+
+All non-health routes require an `X-API-Key` header.
 
 - `GET /api/illust/{pixiv_id}`
 - `GET /api/novel/{pixiv_id}`
 - `GET /api/illust/{pixiv_id}/history`
 - `GET /api/novel/{pixiv_id}/history`
-- `GET /api/illust/{pixiv_id}/versions/{version_no}`
-- `GET /api/novel/{pixiv_id}/versions/{version_no}`
-
-Administrative endpoints:
+- `GET /api/illust/{pixiv_id}/versions/{number}`
+- `GET /api/novel/{pixiv_id}/versions/{number}`
 - `GET /api/admin/cache/status`
-- `GET /api/admin/cache/{kind}/{pixiv_id}`
-- `POST /api/admin/cache/{kind}/{pixiv_id}/refresh`
+- `GET /api/admin/cache/{kind}/{id}`
+- `POST /api/admin/cache/{kind}/{id}/refresh`
 
-When `refresh=true`, the backend fetches Pixiv metadata and checks the
-`version_token`; if changed, it writes a new immutable version directory
-and updates the database's current version pointer. Prior versions remain on
-disk. With `refresh=false`, eligible cached data is returned directly.
-`REMOTE_CHECK_TTL_SECONDS=0` validates each refreshed request.
+`refresh=true` checks upstream according to
+`REMOTE_CHECK_TTL_SECONDS` (0 checks each request). `refresh=false`
+returns locally authorized cached content. When Pixiv reports a work
+deleted/private, its regular data and protected media are blocked.
+On transient upstream unavailability, optionally serve an already
+authorized stale cache.
 
-Pixiv does not reliably expose a modification timestamp for every work.
-The fallback fingerprint uses metadata and for novels the text body. For
-illustrations, a replaced image that retains the same metadata and URL
-might not be detected without a content check.
+## Testing
 
-Media URLs are restricted to database-registered files, and access to
-deleted/restricted works is denied. Remote temporary outages can serve a
-previously authorized stale version when configured.
+```sh
+pip install -e '.[dev]'
+pytest -q --ignore=tests/test_mysql_integration.py
+```
 
-For tests run `pip install -e '.[dev]'` and `pytest -q
---ignore=tests/test_mysql_integration.py`. The separate integration test
-needs its own ephemeral MySQL+Redis environment.
+GitHub Actions separately provisions a disposable MySQL/Redis environment,
+**explicitly** executes the manually maintained SQL there, and verifies V1
+creation, validation, V2 update and history persistence. No production runtime
+initialization is introduced by the CI helper.
 
-For authorized real Pixiv integration testing see
-[the live validation guide](docs/LIVE_VALIDATION.md).
+[Real Pixiv validation](docs/LIVE_VALIDATION.md) is separate; never commit or
+share your Pixiv refresh token.
