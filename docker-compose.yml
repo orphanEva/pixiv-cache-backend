@@ -4,7 +4,7 @@ services:
     env_file: .env
     restart: unless-stopped
     ports:
-      - "18081:8000"
+      - "${API_BIND_ADDRESS:-127.0.0.1}:18081:8000"
     volumes:
       - ./data:/data/pixiv
     depends_on:
@@ -25,13 +25,13 @@ services:
     environment:
       MYSQL_DATABASE: pixiv_cache
       MYSQL_USER: pixiv
-      MYSQL_PASSWORD: pixiv
-      MYSQL_ROOT_PASSWORD: change-me
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-upixiv", "-ppixiv"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql -upixiv -h127.0.0.1 -N -e 'SELECT 1' pixiv_cache >/dev/null"]
       interval: 5s
       timeout: 3s
       retries: 20
