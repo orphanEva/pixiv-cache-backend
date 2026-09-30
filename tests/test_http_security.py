@@ -54,7 +54,7 @@ async def test_media_denies_revoked_and_allows_registered_file(tmp_path: Path):
             await get_media(WorkType.ILLUST, 1, 1, "0.jpg", Session([(str(path), WorkStatus.RESTRICTED)]))
         assert exc.value.status_code == 403
         response = await get_media(WorkType.ILLUST, 1, 1, "0.jpg", Session([(str(path), WorkStatus.ACTIVE)]))
-        assert response.path == str(path)
+        assert Path(response.path) == path
         with pytest.raises(HTTPException) as exc:
             await get_media(WorkType.ILLUST, 1, 1, "other.jpg", Session([(str(path), WorkStatus.ACTIVE)]))
         assert exc.value.status_code == 404
