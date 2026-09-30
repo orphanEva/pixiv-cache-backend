@@ -1,6 +1,6 @@
 [project]
 name = "pixiv-cache-backend"
-version = "0.9.0"
+version = "1.0.0"
 description = "Local caching backend for Pixiv illustrations and novels with immutable version history."
 requires-python = ">=3.12"
 dependencies = [
@@ -13,6 +13,9 @@ dependencies = [
   "httpx>=0.28,<1",
   "pixivpy3>=3.7.5,<4",
   "python-multipart>=0.0.20,<1",
+  "gppt>=5.1.0,<6",
+  "playwright>=1.55,<2",
+  "pyotp>=2.9,<3",
 ]
 
 [project.optional-dependencies]
