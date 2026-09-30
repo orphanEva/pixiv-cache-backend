@@ -1,3 +1,4 @@
+# External MySQL is REQUIRED. This compose file never creates a MySQL database/table.
 services:
   api:
     build: .
@@ -8,8 +9,6 @@ services:
     volumes:
       - ./data:/data/pixiv
     depends_on:
-      mysql:
-        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
@@ -18,23 +17,6 @@ services:
       timeout: 3s
       retries: 5
       start_period: 15s
-
-  mysql:
-    image: mysql:8.4
-    restart: unless-stopped
-    environment:
-      MYSQL_DATABASE: pixiv_cache
-      MYSQL_USER: pixiv
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
-    volumes:
-      - mysql-data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql -upixiv -h127.0.0.1 -N -e 'SELECT 1' pixiv_cache >/dev/null"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
 
   redis:
     image: redis:7.4-alpine
@@ -49,5 +31,4 @@ services:
       retries: 10
 
 volumes:
-  mysql-data:
   redis-data:

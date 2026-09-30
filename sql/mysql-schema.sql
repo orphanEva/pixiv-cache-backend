@@ -1,9 +1,9 @@
--- Pixiv Cache Backend / MySQL 8.0+
--- Mirrors Alembic revision 0001_initial.
--- Choose ONE initialization method:
---   A. Preferred: let "alembic upgrade head" create these tables;
---   B. Manually run this SQL in a new database, then run "alembic stamp 0001_initial".
--- NEVER apply this DDL and then run "alembic upgrade head" on the same schema without stamping.
+-- Pixiv Cache Backend / MySQL 8.0+ / MANUAL INITIALIZATION ONLY
+-- Run this SQL manually once with a database administrator account.
+-- Application startup and Docker Compose DO NOT execute this script.
+-- Create the restricted application user and its CRUD grants separately;
+-- see docs/MANUAL_DATABASE_SETUP.md.
+-- For an existing DB, review the script and back up your data before changing schema.
 
 CREATE DATABASE IF NOT EXISTS pixiv_cache
   CHARACTER SET utf8mb4
