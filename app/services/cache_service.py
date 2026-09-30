@@ -208,7 +208,7 @@ class CacheService:
             .where(PixivWork.pixiv_id == pixiv_id, PixivWork.work_type == work_type)
             .options(selectinload(PixivWork.versions).selectinload(PixivVersion.assets))
         )
-        result = await self.session.execute(stmt)
+        result = await self.session.execute(stmt.execution_options(populate_existing=True))
         return result.scalar_one_or_none()
 
     def _to_response(

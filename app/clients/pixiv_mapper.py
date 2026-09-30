@@ -11,6 +11,8 @@ from app.schemas.pixiv import RemoteAsset, RemoteSnapshot
 
 
 def to_dict(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
@@ -19,7 +21,10 @@ def to_dict(value: Any) -> Any:
         return [to_dict(v) for v in value]
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
-        return to_dict(model_dump())
+        try:
+            return to_dict(model_dump(mode="json"))
+        except TypeError:
+            return to_dict(model_dump())
     items = getattr(value, "items", None)
     if callable(items):
         return {k: to_dict(v) for k, v in items()}
