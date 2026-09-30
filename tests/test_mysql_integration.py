@@ -30,7 +30,7 @@ class FakePixiv(PixivClient):
         raise AssertionError("unexpected illust call")
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_mysql_redis_cache_lifecycle(tmp_path: Path):
     settings = get_settings()
     old_root, old_ttl = settings.storage_root, settings.remote_check_ttl_seconds
@@ -67,7 +67,7 @@ async def test_mysql_redis_cache_lifecycle(tmp_path: Path):
         await close_redis()
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_series_and_tag_relationships_follow_updates(tmp_path: Path):
     """A real MySQL FK check: series must exist before a new work references it."""
     settings = get_settings()
