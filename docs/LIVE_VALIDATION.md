@@ -8,7 +8,7 @@ headers into chat or GitHub.
    first. The app will not create MySQL databases or tables.
 2. Clone this repository, copy `.env.example` to `.env`, and set
    `DATABASE_URL` for your external MySQL and your own `API_KEY`.
-3. Set your Pixiv refresh token privately as `PIXIV_REFRESH_TOKEN`.
+3. Set your Pixiv refresh token privately as `PIXIV_REFRESH_TOKEN`. Optionally set `PIXIV_COOKIE` to the raw Cookie header from your own logged-in browser session.
 4. Run `docker compose config --quiet` and
    `docker compose up -d --build`.
 5. `curl -sS http://127.0.0.1:18081/health/ready` should report
@@ -23,3 +23,14 @@ headers into chat or GitHub.
 CI unit and throwaway-DB integration tests cannot replace real Pixiv auth
 and download validation. The metadata fingerprint cannot guarantee
 detection of replaced images when URLs and metadata remain unchanged.
+
+
+9. Verify both Pixiv credentials without revealing them:
+
+```sh
+curl -sS -H "X-API-Key: YOUR_LOCAL_KEY" \
+  http://127.0.0.1:18081/api/admin/pixiv/auth/status
+```
+
+Only share the boolean/status result if troubleshooting. Never share
+`PIXIV_COOKIE`, `PHPSESSID` or `PIXIV_REFRESH_TOKEN`.

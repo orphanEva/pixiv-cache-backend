@@ -117,3 +117,31 @@ Database file types:
 `UGOIRA_GENERATE_MP4=false` disables only the derived MP4. Raw archival still
 succeeds. `UGOIRA_MAX_FRAMES` and `UGOIRA_MAX_UNCOMPRESSED_BYTES` protect
 against malformed or unexpectedly huge ZIP archives.
+
+
+## Pixiv dual authentication
+
+The App API uses `PIXIV_REFRESH_TOKEN`. Pixiv Web AJAX uses the optional
+raw browser `PIXIV_COOKIE` (typically including `PHPSESSID`). These are
+independent credentials: App API requests keep working if the Web cookie
+expires, and public Web Ugoira metadata falls back to an anonymous request.
+
+Check both without exposing credentials:
+
+```sh
+curl -H "X-API-Key: $API_KEY" \
+  http://127.0.0.1:18081/api/admin/pixiv/auth/status
+```
+
+Example shape:
+
+```json
+{
+  "app_api": {"configured": true, "authenticated": true, "status": "ok"},
+  "web_cookie": {"configured": true, "authenticated": true, "status": "ok"}
+}
+```
+
+The response never contains the refresh token, raw cookie, PHPSESSID or access
+token. Keep `.env` private. If future Pixiv Web POST operations are added,
+they must also implement Pixiv's CSRF-token flow; current Web usage is GET-only.

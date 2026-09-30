@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-import httpx
 from pixivpy3 import AppPixivAPI
 
 from app.clients.base import PixivClient
 from app.clients.pixiv_mapper import apply_ugoira_metadata, build_illust_snapshot, build_novel_snapshot
+from app.clients.pixiv_web_client import PixivWebClient
 from app.core.config import get_settings
 from app.core.errors import PixivAuthError, PixivNotFoundError, PixivRemoteError, PixivRestrictedError, PixivUnavailableError
 from app.models.work import WorkType
@@ -16,14 +16,15 @@ from app.schemas.pixiv import RemoteSnapshot
 class PixivPyClient(PixivClient):
     def __init__(self) -> None:
         settings = get_settings()
-        if not settings.pixiv_refresh_token:
-            raise RuntimeError("PIXIV_REFRESH_TOKEN is required")
         self.api = AppPixivAPI()
         self.refresh_token = settings.pixiv_refresh_token
+        self.web = PixivWebClient()
         self._auth_lock = asyncio.Lock()
         self._next_auth_at = 0.0
 
     async def _ensure_auth(self, force: bool = False) -> None:
+        if not self.refresh_token:
+            raise PixivAuthError("PIXIV_REFRESH_TOKEN is not configured")
         if not force and time.monotonic() < self._next_auth_at:
             return
         async with self._auth_lock:
@@ -68,41 +69,33 @@ class PixivPyClient(PixivClient):
         return snapshot
 
     async def _try_web_ugoira_metadata(self, pixiv_id: int) -> dict | None:
-        """Best-effort public Web API lookup for originalSrc; App API remains fallback."""
-        try:
-            async with httpx.AsyncClient(
-                headers={
-                    "Referer": f"https://www.pixiv.net/artworks/{pixiv_id}",
-                    "User-Agent": "Mozilla/5.0",
-                },
-                follow_redirects=True,
-                timeout=httpx.Timeout(get_settings().download_timeout_seconds),
-            ) as client:
-                response = await client.get(
-                    f"https://www.pixiv.net/ajax/illust/{pixiv_id}/ugoira_meta"
-                )
-                response.raise_for_status()
-                payload = response.json()
-            body = payload.get("body") if isinstance(payload, dict) else None
-            if not isinstance(body, dict) or not body.get("frames"):
-                return None
-            original = body.get("originalSrc")
-            medium = body.get("src")
-            if not original and not medium:
-                return None
-            zip_urls = {}
-            if original:
-                zip_urls["original"] = original
-            if medium:
-                zip_urls["medium"] = medium
-            return {
-                "ugoira_metadata": {
-                    "zip_urls": zip_urls,
-                    "frames": body["frames"],
-                }
-            }
-        except Exception:
-            return None
+        return await self.web.get_ugoira_metadata(pixiv_id)
+
+    async def auth_status(self) -> dict:
+        app_configured = bool(self.refresh_token)
+        app_authenticated = False
+        app_status = "not_configured"
+        if app_configured:
+            try:
+                await self._ensure_auth(force=True)
+                app_authenticated = True
+                app_status = "ok"
+            except PixivAuthError:
+                app_status = "authentication_failed"
+
+        web = await self.web.check_auth()
+        return {
+            "app_api": {
+                "configured": app_configured,
+                "authenticated": app_authenticated,
+                "status": app_status,
+            },
+            "web_cookie": {
+                "configured": web.configured,
+                "authenticated": web.authenticated,
+                "status": web.status,
+            },
+        }
 
     async def get_novel_snapshot(self, pixiv_id: int) -> RemoteSnapshot:
         detail_result, text_result = await asyncio.gather(

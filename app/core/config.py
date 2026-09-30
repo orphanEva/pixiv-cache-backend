@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     storage_root: Path = Path("./data/pixiv")
     pixiv_refresh_token: str = ""
+    pixiv_cookie: str = ""
+    pixiv_web_user_agent: str = "Mozilla/5.0"
+    pixiv_web_accept_language: str = "zh-CN,zh;q=0.9,en;q=0.8"
     api_key: str = ""
     remote_check_ttl_seconds: int = 0
     lock_ttl_seconds: int = 180
