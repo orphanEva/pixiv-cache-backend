@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import redis.asyncio as redis
 from fastapi import APIRouter, Response, status
 from sqlalchemy import text
 
-from app.core.config import get_settings
 from app.db.session import SessionLocal
+from app.core.redis_client import get_redis
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -17,7 +16,6 @@ async def live():
 
 @router.get("/ready")
 async def ready(response: Response):
-    settings = get_settings()
     checks = {"mysql": False, "redis": False}
     try:
         async with SessionLocal() as session:
@@ -26,14 +24,11 @@ async def ready(response: Response):
     except Exception:
         pass
 
-    client = redis.from_url(settings.redis_url)
+    client = get_redis()
     try:
         checks["redis"] = bool(await client.ping())
     except Exception:
         pass
-    finally:
-        await client.aclose()
-
     if not all(checks.values()):
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {"status": "ok" if all(checks.values()) else "degraded", "checks": checks}

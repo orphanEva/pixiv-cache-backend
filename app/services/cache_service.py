@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import logging
 import shutil
 
-import redis.asyncio as redis
-from redis.exceptions import LockNotOwnedError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -17,14 +16,19 @@ from app.models.work import PixivAsset, PixivVersion, PixivWork, WorkStatus, Wor
 from app.schemas.pixiv import AssetResponse, HistoryResponse, RemoteSnapshot, VersionSummary, WorkResponse
 from app.storage.local_storage import LocalStorage
 
+logger = logging.getLogger(__name__)
+
 
 class CacheService:
-    def __init__(self, session: AsyncSession, client: PixivClient):
+    def __init__(self, session: AsyncSession, client: PixivClient, redis_client=None):
         self.session = session
         self.client = client
         self.storage = LocalStorage()
         self.settings = get_settings()
-        self.redis = redis.from_url(self.settings.redis_url, decode_responses=True)
+        if redis_client is None:
+            from app.core.redis_client import get_redis
+            redis_client = get_redis()
+        self.redis = redis_client
 
     async def get_illust(self, pixiv_id: int, refresh: bool = True) -> WorkResponse:
         return await self._get(pixiv_id, WorkType.ILLUST, refresh)
@@ -56,6 +60,7 @@ class CacheService:
     async def _get(self, pixiv_id: int, work_type: WorkType, refresh: bool) -> WorkResponse:
         local = await self._load(pixiv_id, work_type)
         if local and not refresh:
+            logger.info("cache_hit_no_refresh", extra={"pixiv_id": pixiv_id, "work_type": work_type.value, "source": "local"})
             return self._to_response(local, "local")
 
         if local and self.settings.remote_check_ttl_seconds > 0:
@@ -110,6 +115,7 @@ class CacheService:
                 local.last_checked_at = now
                 await self.session.commit()
                 local = await self._load(pixiv_id, work_type)
+                logger.info("cache_validated_unchanged", extra={"pixiv_id": pixiv_id, "work_type": work_type.value, "version": local.current_version_no})
                 return self._to_response(local, "local-validated")
 
             new_version_no = 1 if local is None else local.current_version_no + 1
@@ -168,11 +174,13 @@ class CacheService:
                 raise
 
             local = await self._load(pixiv_id, work_type)
-            return self._to_response(local, "remote-updated" if new_version_no > 1 else "remote-created")
+            source = "remote-updated" if new_version_no > 1 else "remote-created"
+            logger.info("cache_materialized", extra={"pixiv_id": pixiv_id, "work_type": work_type.value, "version": new_version_no, "source": source})
+            return self._to_response(local, source)
         finally:
             try:
                 await lock.release()
-            except LockNotOwnedError:
+            except Exception:
                 pass
 
     async def _mark_remote_status(self, local: PixivWork | None, status: WorkStatus, reason: str) -> None:
