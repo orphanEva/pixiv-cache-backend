@@ -16,10 +16,7 @@ class AuthProbe:
 
 
 class PixivWebClient:
-    """Minimal Pixiv Web AJAX client using a browser session cookie.
-
-    The cookie is only kept in memory and is never returned by public methods.
-    """
+    """Minimal Pixiv Web AJAX client using a browser session cookie."""
 
     def __init__(
         self,
@@ -28,10 +25,15 @@ class PixivWebClient:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.settings = get_settings()
-        self.cookie = (cookie if cookie is not None else self.settings.pixiv_cookie).strip()
-        if "\r" in self.cookie or "\n" in self.cookie:
-            raise ValueError("PIXIV_COOKIE contains invalid newline characters")
+        self.cookie = ""
+        self.set_cookie(cookie if cookie is not None else self.settings.pixiv_cookie)
         self._transport = transport
+
+    def set_cookie(self, cookie: str | None) -> None:
+        value = (cookie or "").strip()
+        if "\r" in value or "\n" in value:
+            raise ValueError("PIXIV_COOKIE contains invalid newline characters")
+        self.cookie = value
 
     @property
     def configured(self) -> bool:
@@ -75,7 +77,7 @@ class PixivWebClient:
 
     async def check_auth(self) -> AuthProbe:
         if not self.configured:
-            return AuthProbe(configured=False, authenticated=False, status="not_configured")
+            return AuthProbe(False, False, "not_configured")
         try:
             payload = await self._get_json("/ajax/user/extra")
             if payload.get("error") is True:
@@ -85,18 +87,14 @@ class PixivWebClient:
             return AuthProbe(True, True, "ok")
         except httpx.HTTPStatusError as exc:
             code = exc.response.status_code
-            if code in (401, 403):
-                return AuthProbe(True, False, f"http_{code}")
-            return AuthProbe(True, False, "http_error")
+            return AuthProbe(
+                True, False,
+                f"http_{code}" if code in (401, 403) else "http_error",
+            )
         except (httpx.HTTPError, ValueError):
             return AuthProbe(True, False, "network_or_response_error")
 
     async def get_ugoira_metadata(self, pixiv_id: int) -> dict[str, Any] | None:
-        """Best-effort Web metadata.
-
-        If a configured cookie has expired, retry anonymously so public works
-        can still use originalSrc when Pixiv exposes it.
-        """
         referer = f"https://www.pixiv.net/artworks/{pixiv_id}"
         attempts = (True, False) if self.configured else (False,)
         for include_cookie in attempts:

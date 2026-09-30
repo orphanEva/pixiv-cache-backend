@@ -145,3 +145,58 @@ Example shape:
 The response never contains the refresh token, raw cookie, PHPSESSID or access
 token. Keep `.env` private. If future Pixiv Web POST operations are added,
 they must also implement Pixiv's CSRF-token flow; current Web usage is GET-only.
+
+
+## Automatic Pixiv authentication
+
+Manual `PIXIV_REFRESH_TOKEN` and `PIXIV_COOKIE` remain supported. To let
+the service maintain them automatically instead:
+
+```env
+PIXIV_AUTO_AUTH=true
+PIXIV_USERNAME=your_pixiv_login
+PIXIV_PASSWORD=your_pixiv_password
+# Optional, for unattended 2FA:
+PIXIV_TOTP_SECRET=BASE32_OR_OTPAUTH_URI
+```
+
+Derived credentials are cached under `/data/pixiv/auth` and survive container
+restarts through the existing `./data:/data/pixiv` volume. The cache contains
+only the derived refresh token and Cookie, not the username/password/TOTP
+secret. Cache files are written with restrictive permissions.
+
+Recovery flow:
+
+```text
+App API:
+cached/manual refresh token
+  -> Pixiv rejects it
+  -> gppt.refresh()
+  -> if refresh fails: gppt.login(username,password,TOTP)
+  -> save new refresh token
+
+Web:
+cached/manual Cookie
+  -> Pixiv Web rejects it / protected metadata unavailable
+  -> headless Chromium login
+  -> optional TOTP
+  -> save new Pixiv Cookie
+```
+
+Automatic browser login is deliberately rate-limited after failures. If Pixiv
+requires CAPTCHA or another human verification step the backend returns
+`interactive_required` instead of repeatedly attempting login.
+
+Check without triggering browser login:
+
+```sh
+curl -H "X-API-Key: $API_KEY" \
+  http://127.0.0.1:18081/api/admin/pixiv/auth/status
+```
+
+Explicitly ask the backend to recover both credentials:
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" \
+  http://127.0.0.1:18081/api/admin/pixiv/auth/refresh
+```
