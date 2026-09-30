@@ -115,3 +115,74 @@ async def test_series_and_tag_relationships_follow_updates(tmp_path: Path):
     finally:
         settings.storage_root, settings.remote_check_ttl_seconds = old_root, old_ttl
         await close_redis()
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_mysql_accepts_ugoira_archive_file_types():
+    """The checked-in manual DDL must accept every Ugoira file type used by code."""
+    from app.models.work import PixivAsset
+    from app.services.cache_service import now_utc
+
+    work_id = "987651236"
+    async with SessionLocal() as session:
+        await session.execute(delete(PixivWork).where(PixivWork.id == work_id))
+        await session.commit()
+
+        work = PixivWork(
+            id=work_id,
+            work_type=WorkType.UGOIRA,
+            status="active",
+            title="ugoira",
+            author_id="1",
+            author_name="artist",
+            page_count=2,
+            metadata_json={},
+            version_token="f" * 64,
+            current_version_no=1,
+            last_checked_at=now_utc(),
+            cached_at=now_utc(),
+        )
+        session.add(work)
+        await session.flush()
+
+        version = PixivVersion(
+            work_id=work_id,
+            version_no=1,
+            version_token="f" * 64,
+            title="ugoira",
+            tags_snapshot=[],
+            metadata_json={},
+            storage_path="/tmp/ugoira",
+            created_at=now_utc(),
+        )
+        session.add(version)
+        await session.flush()
+
+        for index, file_type in enumerate(("ugoira_zip", "ugoira_meta", "ugoira_mp4")):
+            path = f"/tmp/ugoira/{file_type}"
+            session.add(PixivAsset(
+                version_id=version.id,
+                page_index=index,
+                file_type=file_type,
+                local_path=path,
+                sha256="0" * 64,
+                size_bytes=1,
+            ))
+            session.add(CurrentFile(
+                work_id=work_id,
+                page_index=index,
+                file_type=file_type,
+                local_path=path,
+                sha256="0" * 64,
+                size_bytes=1,
+            ))
+        await session.commit()
+
+        history_types = (await session.execute(
+            select(PixivAsset.file_type).where(PixivAsset.version_id == version.id)
+        )).scalars().all()
+        current_types = (await session.execute(
+            select(CurrentFile.file_type).where(CurrentFile.work_id == work_id)
+        )).scalars().all()
+        assert set(history_types) == {"ugoira_zip", "ugoira_meta", "ugoira_mp4"}
+        assert set(current_types) == {"ugoira_zip", "ugoira_meta", "ugoira_mp4"}

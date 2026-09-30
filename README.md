@@ -34,10 +34,12 @@ A new version changes `works.current_version_no` and re-points
 fingerprint including novel text or illustration URL/metadata where available;
 a remote image replaced in place behind an unchanged URL can still be missed.
 
-The SQL accommodates manga, ugoira, series and media types, but the current
-fetching implementation exposes image/novel APIs only. A ugoira illustration
-response may include a cover; **animated frame/ZIP capture and video ingestion
-are not yet implemented**.
+Ugoira archival is implemented through the existing `/api/illust/{id}` route.
+For an Ugoira work, the backend fetches Pixiv's Ugoira metadata, downloads the
+original ZIP, validates every declared frame, preserves exact per-frame delay
+metadata, extracts the frame sequence, and optionally creates a browser-friendly
+MP4 with FFmpeg. The ZIP + frame timing JSON are the archival source of truth;
+the MP4 is a derived preview and may be regenerated later.
 
 ## Start
 
@@ -88,3 +90,30 @@ initialization is introduced by the CI helper.
 
 [Real Pixiv validation](docs/LIVE_VALIDATION.md) is separate; never commit or
 share your Pixiv refresh token.
+
+
+## Ugoira archive layout
+
+For work `123`, version `2`:
+
+```text
+data/ugoira/123/versions/2/
+├── original.zip
+├── ugoira_meta.json
+├── preview.mp4
+├── cover.jpg              # when Pixiv exposes a cover
+└── frames/
+    ├── 000000.jpg
+    ├── 000001.jpg
+    └── ...
+```
+
+Database file types:
+- `ugoira_zip`: original Pixiv ZIP
+- `ugoira_meta`: exact frame names and millisecond delays
+- `ugoira_mp4`: derived FFmpeg preview
+- `cover`: still preview image
+
+`UGOIRA_GENERATE_MP4=false` disables only the derived MP4. Raw archival still
+succeeds. `UGOIRA_MAX_FRAMES` and `UGOIRA_MAX_UNCOMPRESSED_BYTES` protect
+against malformed or unexpectedly huge ZIP archives.
