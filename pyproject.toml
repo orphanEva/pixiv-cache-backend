@@ -13,7 +13,6 @@ dependencies = [
   "httpx>=0.28,<1",
   "pixivpy3>=3.7.5,<4",
   "python-multipart>=0.0.20,<1",
-  "alembic>=1.14,<2"
 ]
 
 [project.optional-dependencies]
