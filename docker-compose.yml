@@ -1,0 +1,39 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "18081:8000"
+    volumes:
+      - ./data:/data/pixiv
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: pixiv_cache
+      MYSQL_USER: pixiv
+      MYSQL_PASSWORD: pixiv
+      MYSQL_ROOT_PASSWORD: change-me
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-upixiv", "-ppixiv"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
+volumes:
+  mysql-data:
+  redis-data:

@@ -1,0 +1,28 @@
+[project]
+name = "pixiv-cache-backend"
+version = "0.1.0"
+description = "Local caching backend for Pixiv illustrations and novels with immutable version history."
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "sqlalchemy>=2.0,<3",
+  "asyncmy>=0.2.10,<1",
+  "redis>=5.2,<7",
+  "pydantic-settings>=2.7,<3",
+  "httpx>=0.28,<1",
+  "pixivpy3>=3.7.5,<4",
+  "python-multipart>=0.0.20,<1",
+  "alembic>=1.14,<2"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "aiosqlite>=0.20,<1"
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
