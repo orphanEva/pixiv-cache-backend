@@ -238,6 +238,9 @@ class CacheService:
                 author_id=str(snapshot.author_id or 0),
                 author_name=(snapshot.author_name or "")[:128],
             ))
+            # Flush the parent explicitly: SQLAlchemy cannot always order
+            # unrelated ORM objects solely from a populated FK string.
+            await self.session.flush()
 
     async def _sync_tags(self, work_id: str, tags: list[dict]) -> None:
         await self.session.execute(delete(WorkTagRelation).where(WorkTagRelation.work_id == work_id))
