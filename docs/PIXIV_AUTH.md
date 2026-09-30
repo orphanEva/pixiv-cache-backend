@@ -46,3 +46,43 @@ It never returns the cookie, PHPSESSID, refresh token or App access token.
 
 Web-cookie validity is probed using Pixiv's login-required
 `/ajax/user/extra` endpoint.
+
+
+## Automatic mode
+
+Set `PIXIV_AUTO_AUTH=true` together with `PIXIV_USERNAME` and
+`PIXIV_PASSWORD`. If the account uses TOTP two-factor authentication, also
+set `PIXIV_TOTP_SECRET` to the base32 secret or the original `otpauth://`
+URI.
+
+App API credential recovery uses gppt 5.x: a cached refresh token is tried
+first, then `gppt.refresh()`, then a fresh headless `gppt.login()` only when
+necessary. gppt 5.1.0 currently documents Python-level `login`, `refresh`
+and TOTP support for unattended authentication.
+
+Web Cookie recovery uses a separate Playwright Chromium session. The browser
+fills Pixiv's username/password form, handles a standard visible TOTP field
+when a TOTP secret is configured, then exports only Pixiv-domain cookies into
+the private cache. Browser localStorage is not persisted.
+
+Derived credentials live under `PIXIV_AUTH_CACHE_DIR` (default
+`/data/pixiv/auth`). Username, password and TOTP secret stay in the process
+configuration and are never written into those cache files.
+
+### Human verification
+
+CAPTCHA, challenge pages, unsupported passkey-only flows, or a changed login
+form are not bypassed. Automatic login stops with a status such as
+`interactive_required`, `totp_required`, or `login_form_changed`.
+Failed browser/App logins are subject to
+`PIXIV_AUTO_LOGIN_COOLDOWN_SECONDS` (default 900 seconds) to avoid tight retry
+loops and account lockouts.
+
+### Manual mode priority
+
+If `PIXIV_REFRESH_TOKEN` or `PIXIV_COOKIE` is explicitly set, that value is
+preferred over the derived cache. Automatic recovery is used only when
+`PIXIV_AUTO_AUTH=true`.
+
+No database schema change is required; authentication data is intentionally
+kept out of MySQL.

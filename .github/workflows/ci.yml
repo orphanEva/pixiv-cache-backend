@@ -61,6 +61,4 @@ jobs:
       - name: Verify FFmpeg exists in image
         run: docker run --rm --entrypoint ffmpeg pixiv-cache-backend:ci -version
       - name: Verify headless Chromium launches
-        run: |
-          docker run --rm --entrypoint python pixiv-cache-backend:ci -c \
-            "import asyncio; from playwright.async_api import async_playwright; async def m():\n async with async_playwright() as p:\n  b=await p.chromium.launch(headless=True,args=['--no-sandbox']); print(await b.version()); await b.close()\nasyncio.run(m())"
+        run: docker run --rm --entrypoint python pixiv-cache-backend:ci scripts/check_playwright.py
