@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.clients.base import PixivClient
 from app.core.config import get_settings
+from app.core.security import cache_read_allowed
 from app.core.errors import PixivAuthError, PixivNotFoundError, PixivRemoteError, PixivRestrictedError, PixivUnavailableError
 from app.models.work import PixivAsset, PixivVersion, PixivWork, WorkStatus, WorkType
 from app.schemas.pixiv import AssetResponse, HistoryResponse, RemoteSnapshot, VersionSummary, WorkResponse
@@ -40,6 +41,7 @@ class CacheService:
         local = await self._load(pixiv_id, work_type)
         if local is None:
             raise PixivNotFoundError(f"No local {work_type.value} cache for {pixiv_id}")
+        self._require_local_access(local)
         versions = [self._version_summary(v) for v in sorted(local.versions, key=lambda x: x.version_no, reverse=True)]
         return HistoryResponse(
             pixiv_id=pixiv_id,
@@ -52,6 +54,7 @@ class CacheService:
         local = await self._load(pixiv_id, work_type)
         if local is None:
             raise PixivNotFoundError(f"No local {work_type.value} cache for {pixiv_id}")
+        self._require_local_access(local)
         version = next((v for v in local.versions if v.version_no == version_no), None)
         if version is None:
             raise PixivNotFoundError(f"Version {version_no} not found for {work_type.value} {pixiv_id}")
@@ -60,10 +63,11 @@ class CacheService:
     async def _get(self, pixiv_id: int, work_type: WorkType, refresh: bool) -> WorkResponse:
         local = await self._load(pixiv_id, work_type)
         if local and not refresh:
+            self._require_local_access(local)
             logger.info("cache_hit_no_refresh", extra={"pixiv_id": pixiv_id, "work_type": work_type.value, "source": "local"})
             return self._to_response(local, "local")
 
-        if local and self.settings.remote_check_ttl_seconds > 0:
+        if local and cache_read_allowed(local.status.value) and self.settings.remote_check_ttl_seconds > 0:
             age = (datetime.now(timezone.utc) - self._as_utc(local.last_checked_at)).total_seconds()
             if age < self.settings.remote_check_ttl_seconds:
                 return self._to_response(local, "local-recently-validated")
@@ -78,12 +82,14 @@ class CacheService:
         if not acquired:
             local = await self._load(pixiv_id, work_type)
             if local:
+                self._require_local_access(local)
                 return self._to_response(local, "local-lock-timeout")
             raise PixivUnavailableError(f"Could not acquire cache lock for {lock_name}")
 
         try:
             local = await self._load(pixiv_id, work_type)
             if local and not refresh:
+                self._require_local_access(local)
                 return self._to_response(local, "local")
 
             try:
@@ -261,6 +267,15 @@ class CacheService:
     def _public_path(self, path: str) -> str:
         relative = Path(path).resolve().relative_to(self.settings.storage_root.resolve())
         return f"/media/{relative.as_posix()}"
+
+    @staticmethod
+    def _require_local_access(work: PixivWork) -> None:
+        if not cache_read_allowed(work.status.value):
+            if work.status == WorkStatus.DELETED:
+                raise PixivNotFoundError("Remote work is no longer accessible")
+            if work.status == WorkStatus.AUTH_REQUIRED:
+                raise PixivAuthError("Remote authorization requires renewal")
+            raise PixivRestrictedError("Remote work is restricted")
 
     @staticmethod
     def _as_utc(value: datetime) -> datetime:

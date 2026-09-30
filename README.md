@@ -90,3 +90,24 @@ Illustrations are streamed to `*.part`, validated as image content, bounded by `
 pip install -e '.[dev]'
 pytest -q
 ```
+
+## API key and protected media access (v0.7)
+
+Set a strong random `API_KEY` in `.env`; all endpoints other than health require
+the `X-API-Key` header. Without a key at least 32 characters long, non-health
+endpoints return 503. Do not place the key in browser JavaScript or query strings.
+
+```bash
+curl -H "X-API-Key: $API_KEY" 'http://127.0.0.1:18081/api/admin/cache/status'
+```
+
+Media is served only from database-registered paths and only while the work's
+last recorded state permits cached access. Restricted/deleted/reauthentication
+states cannot be read through media, history, or refresh=false.
+
+Admin endpoints:
+- `GET /api/admin/cache/status`
+- `GET /api/admin/cache/{kind}/{pixiv_id}`
+- `POST /api/admin/cache/{kind}/{pixiv_id}/refresh`
+
+Historical versions are retained; destructive deletion is deliberately not exposed.
