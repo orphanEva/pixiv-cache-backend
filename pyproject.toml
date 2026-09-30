@@ -1,6 +1,6 @@
 [project]
 name = "pixiv-cache-backend"
-version = "0.6.0"
+version = "0.6.1"
 description = "Local caching backend for Pixiv illustrations and novels with immutable version history."
 requires-python = ">=3.12"
 dependencies = [
@@ -26,3 +26,10 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
+
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
