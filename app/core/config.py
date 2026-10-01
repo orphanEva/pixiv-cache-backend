@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     lock_wait_seconds: int = 30
     serve_stale_on_remote_unavailable: bool = True
     max_asset_bytes: int = 150 * 1024 * 1024
+    storage_audit_max_findings: int = 200
     download_timeout_seconds: int = 120
     ugoira_generate_mp4: bool = True
     ugoira_keep_extracted_frames: bool = False

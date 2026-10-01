@@ -7,6 +7,7 @@ from app.models.work import PixivWork, PixivVersion, WorkType
 from app.api.routes import get_client
 from app.services.cache_service import CacheService
 from app.core.errors import PixivRemoteError
+from app.services.storage_integrity import StorageIntegrityService
 
 router = APIRouter(prefix="/api/admin/cache", tags=["admin"])
 
@@ -40,3 +41,13 @@ async def force_refresh(kind: WorkType, pixiv_id: int, session: AsyncSession = D
         return await service._get(pixiv_id, kind, refresh=True, bypass_ttl=True)
     except PixivRemoteError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
+
+
+
+@router.post("/storage/reconcile")
+async def storage_reconcile(
+    verify_hash: bool = False,
+    session: AsyncSession = Depends(get_session),
+):
+    """Read-only storage/DB consistency audit. Never deletes or mutates files."""
+    return await StorageIntegrityService(session).audit(verify_hash=verify_hash)
