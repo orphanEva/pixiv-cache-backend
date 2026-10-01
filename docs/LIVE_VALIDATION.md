@@ -12,7 +12,7 @@ headers into chat or GitHub.
 4. Run `docker compose config --quiet` and
    `docker compose up -d --build`.
 5. `curl -sS http://127.0.0.1:18081/health/ready` should report
-   `{"status":"ok","checks":{"mysql":true,"redis":true}}`.
+   `{"status":"ok","checks":{"mysql":true,"schema":true,"redis":true}}`.
 6. Test one public image ID and one public novel ID using an authenticated
    `X-API-Key` header on `/api/illust/ID` and `/api/novel/ID`.
 7. Repeat requests and verify `source` and `version`. Use
@@ -34,3 +34,14 @@ curl -sS -H "X-API-Key: YOUR_LOCAL_KEY" \
 
 Only share the boolean/status result if troubleshooting. Never share
 `PIXIV_COOKIE`, `PHPSESSID` or `PIXIV_REFRESH_TOKEN`.
+
+
+10. Optional integrity checks:
+
+```sh
+curl -X POST -H "X-API-Key: YOUR_LOCAL_KEY" \
+  "http://127.0.0.1:18081/api/admin/cache/storage/reconcile?verify_hash=false"
+```
+
+Run once with `verify_hash=true` after initial validation if you want a full
+local SHA-256 audit.

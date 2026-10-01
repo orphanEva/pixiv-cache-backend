@@ -2,19 +2,38 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import Any, NoReturn
+
 from pixivpy3 import AppPixivAPI
 
 from app.auth.pixiv_credentials import AutoAuthError, PixivCredentialManager
 from app.clients.base import PixivClient
-from app.clients.pixiv_mapper import apply_ugoira_metadata, build_illust_snapshot, build_novel_snapshot
+from app.clients.pixiv_mapper import (
+    apply_ugoira_metadata,
+    build_illust_snapshot,
+    build_novel_snapshot,
+    to_dict,
+)
 from app.clients.pixiv_web_client import PixivWebClient
 from app.core.config import get_settings
-from app.core.errors import PixivAuthError, PixivNotFoundError, PixivRemoteError, PixivRestrictedError, PixivUnavailableError
+from app.core.errors import (
+    PixivAuthError,
+    PixivNotFoundError,
+    PixivRemoteError,
+    PixivRestrictedError,
+    PixivUnavailableError,
+)
 from app.models.work import WorkType
 from app.schemas.pixiv import RemoteSnapshot
 
 
 class PixivPyClient(PixivClient):
+    """Serialized wrapper around one PixivPy AppPixivAPI instance.
+
+    PixivPy does not document AppPixivAPI as thread-safe. All calls touching the
+    shared SDK instance, including auth(), therefore pass through _api_lock.
+    """
+
     def __init__(self) -> None:
         self.settings = get_settings()
         self.api = AppPixivAPI()
@@ -22,7 +41,12 @@ class PixivPyClient(PixivClient):
         self.refresh_token = self.credentials.current_refresh_token()
         self.web = PixivWebClient(cookie=self.credentials.current_cookie())
         self._auth_lock = asyncio.Lock()
+        self._api_lock = asyncio.Lock()
         self._next_auth_at = 0.0
+
+    async def _invoke_api(self, func, *args, **kwargs):
+        async with self._api_lock:
+            return await asyncio.to_thread(func, *args, **kwargs)
 
     async def _ensure_auth(self, force: bool = False) -> None:
         if not force and time.monotonic() < self._next_auth_at:
@@ -36,42 +60,155 @@ class PixivPyClient(PixivClient):
                 try:
                     self.refresh_token = await self.credentials.ensure_refresh_token()
                 except AutoAuthError as exc:
-                    raise PixivAuthError(f"Pixiv App authentication unavailable: {exc.status}") from None
+                    raise PixivAuthError(
+                        f"Pixiv App authentication unavailable: {exc.status}"
+                    ) from None
 
             try:
-                await asyncio.to_thread(self.api.auth, refresh_token=self.refresh_token)
+                await self._invoke_api(self.api.auth, refresh_token=self.refresh_token)
             except Exception:
                 if not self.settings.pixiv_auto_auth:
                     raise PixivAuthError("Pixiv App authentication failed") from None
                 try:
                     self.refresh_token = await self.credentials.recover_refresh_token()
-                    await asyncio.to_thread(self.api.auth, refresh_token=self.refresh_token)
+                    await self._invoke_api(
+                        self.api.auth, refresh_token=self.refresh_token
+                    )
                 except Exception as exc:
-                    status = exc.status if isinstance(exc, AutoAuthError) else "authentication_failed"
-                    raise PixivAuthError(f"Pixiv App automatic authentication failed: {status}") from None
+                    status = (
+                        exc.status
+                        if isinstance(exc, AutoAuthError)
+                        else "authentication_failed"
+                    )
+                    raise PixivAuthError(
+                        f"Pixiv App automatic authentication failed: {status}"
+                    ) from None
 
             self._next_auth_at = time.monotonic() + 45 * 60
 
     async def _call(self, func, *args):
         await self._ensure_auth()
         try:
-            return await asyncio.to_thread(func, *args)
+            result = await self._invoke_api(func, *args)
+            self._raise_for_pixiv_error(result)
+            return result
+        except PixivAuthError:
+            self._next_auth_at = 0.0
+            await self._ensure_auth(force=True)
+            try:
+                result = await self._invoke_api(func, *args)
+                self._raise_for_pixiv_error(result)
+                return result
+            except PixivRemoteError:
+                raise
+            except Exception as retry_exc:
+                self._raise_mapped_exception(retry_exc)
+        except PixivRemoteError:
+            raise
         except Exception as exc:
-            message = str(exc).lower()
-            if any(x in message for x in ("oauth", "token", "401", "unauthorized")):
+            if self._exception_is_auth(exc):
                 self._next_auth_at = 0.0
                 await self._ensure_auth(force=True)
                 try:
-                    return await asyncio.to_thread(func, *args)
-                except Exception:
-                    raise PixivAuthError("Pixiv authentication failed after credential recovery") from None
-            if any(x in message for x in ("404", "not found", "does not exist")):
-                raise PixivNotFoundError(str(exc)) from exc
-            if any(x in message for x in ("403", "forbidden", "restricted", "private")):
-                raise PixivRestrictedError(str(exc)) from exc
-            if any(x in message for x in ("429", "rate limit", "too many requests", "timeout", "temporarily")):
-                raise PixivUnavailableError(str(exc)) from exc
-            raise PixivRemoteError(str(exc)) from exc
+                    result = await self._invoke_api(func, *args)
+                    self._raise_for_pixiv_error(result)
+                    return result
+                except PixivRemoteError:
+                    raise
+                except Exception as retry_exc:
+                    self._raise_mapped_exception(retry_exc)
+            self._raise_mapped_exception(exc)
+
+    @staticmethod
+    def _error_text(payload: Any) -> str:
+        data = to_dict(payload)
+        if not isinstance(data, dict):
+            return str(data or "")
+        error = data.get("error")
+        if not error:
+            return ""
+        if isinstance(error, dict):
+            pieces = [
+                error.get("message"),
+                error.get("user_message"),
+                error.get("reason"),
+                error.get("details"),
+            ]
+            return " ".join(str(item) for item in pieces if item).strip()
+        return str(error).strip()
+
+    def _raise_for_pixiv_error(self, result: Any) -> None:
+        message = self._error_text(result)
+        if message:
+            self._raise_mapped_message(message)
+
+    @staticmethod
+    def _exception_is_auth(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(
+            marker in text
+            for marker in ("oauth", "invalid_grant", "token", "401", "unauthorized")
+        )
+
+    def _raise_mapped_exception(self, exc: Exception) -> NoReturn:
+        self._raise_mapped_message(str(exc), cause=exc)
+
+    @staticmethod
+    def _raise_mapped_message(
+        message: str, cause: Exception | None = None
+    ) -> NoReturn:
+        text = message.lower()
+        if any(
+            marker in text
+            for marker in (
+                "oauth",
+                "invalid_grant",
+                "access token",
+                "refresh token",
+                "401",
+                "unauthorized",
+                "authentication required",
+            )
+        ):
+            raise PixivAuthError(message or "Pixiv authentication failed") from cause
+        if any(
+            marker in text
+            for marker in (
+                "404",
+                "not found",
+                "does not exist",
+                "deleted",
+                "work not found",
+            )
+        ):
+            raise PixivNotFoundError(message or "Pixiv work not found") from cause
+        if any(
+            marker in text
+            for marker in (
+                "403",
+                "forbidden",
+                "restricted",
+                "private",
+                "not public",
+                "閲覧できません",
+            )
+        ):
+            raise PixivRestrictedError(message or "Pixiv work is restricted") from cause
+        if any(
+            marker in text
+            for marker in (
+                "429",
+                "rate limit",
+                "too many requests",
+                "timeout",
+                "timed out",
+                "temporarily",
+                "service unavailable",
+                "503",
+            )
+        ):
+            raise PixivUnavailableError(message or "Pixiv is temporarily unavailable") from cause
+        raise PixivRemoteError(message or "Pixiv returned an unknown error") from cause
 
     async def get_illust_snapshot(self, pixiv_id: int) -> RemoteSnapshot:
         result = await self._call(self.api.illust_detail, pixiv_id)
@@ -98,7 +235,6 @@ class PixivPyClient(PixivClient):
 
     async def auth_status(self) -> dict:
         state = self.credentials.state()
-
         app_configured = bool(self.refresh_token)
         app_authenticated = False
         app_status = "not_configured"
@@ -110,11 +246,8 @@ class PixivPyClient(PixivClient):
             except PixivAuthError:
                 app_status = "authentication_failed"
 
-        # Refresh the Web client from explicit/cache state, but status itself does
-        # not trigger a browser login.
         self.web.set_cookie(self.credentials.current_cookie())
         web = await self.web.check_auth()
-
         return {
             "auto_auth": {
                 "enabled": state.auto_enabled,
@@ -139,7 +272,6 @@ class PixivPyClient(PixivClient):
     async def recover_auth(self) -> dict:
         app_status = "unchanged"
         web_status = "unchanged"
-
         try:
             self.refresh_token = await self.credentials.recover_refresh_token()
             self._next_auth_at = 0.0
@@ -161,15 +293,18 @@ class PixivPyClient(PixivClient):
                 web_status = "ok" if probe.authenticated else probe.status
             except AutoAuthError as exc:
                 web_status = exc.status
-
         return {
             "app_api": {"status": app_status},
             "web_cookie": {"status": web_status},
         }
 
     async def get_novel_snapshot(self, pixiv_id: int) -> RemoteSnapshot:
+        # gather() is kept so callers do not depend on ordering, while _api_lock
+        # guarantees the shared PixivPy instance itself is never used concurrently.
         detail_result, text_result = await asyncio.gather(
             self._call(self.api.novel_detail, pixiv_id),
             self._call(self.api.novel_text, pixiv_id),
         )
-        return build_novel_snapshot(getattr(detail_result, "novel", None), text_result, pixiv_id)
+        return build_novel_snapshot(
+            getattr(detail_result, "novel", None), text_result, pixiv_id
+        )

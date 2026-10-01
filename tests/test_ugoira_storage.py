@@ -36,8 +36,12 @@ def test_extract_ugoira_frames_validates_expected_members(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_materialize_ugoira_keeps_raw_meta_and_derived_mp4(tmp_path: Path, monkeypatch):
     settings = get_settings()
-    old_root, old_mp4 = settings.storage_root, settings.ugoira_generate_mp4
-    settings.storage_root, settings.ugoira_generate_mp4 = tmp_path, True
+    old_root = settings.storage_root
+    old_mp4 = settings.ugoira_generate_mp4
+    old_keep = settings.ugoira_keep_extracted_frames
+    settings.storage_root = tmp_path
+    settings.ugoira_generate_mp4 = True
+    settings.ugoira_keep_extracted_frames = False
     storage = LocalStorage()
     storage.root = tmp_path
 
@@ -74,6 +78,8 @@ async def test_materialize_ugoira_keeps_raw_meta_and_derived_mp4(tmp_path: Path,
         assert (Path(root) / "original.zip").is_file()
         assert (Path(root) / "ugoira_meta.json").is_file()
         assert (Path(root) / "preview.mp4").read_bytes() == b"fake-mp4"
-        assert len(list((Path(root) / "frames").iterdir())) == 2
+        assert not (Path(root) / "frames").exists()
     finally:
-        settings.storage_root, settings.ugoira_generate_mp4 = old_root, old_mp4
+        settings.storage_root = old_root
+        settings.ugoira_generate_mp4 = old_mp4
+        settings.ugoira_keep_extracted_frames = old_keep

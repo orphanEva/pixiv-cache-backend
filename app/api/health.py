@@ -3,8 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Response, status
 from sqlalchemy import text
 
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.core.redis_client import get_redis
+from app.core.schema_version import EXPECTED_SCHEMA_VERSION, read_schema_version
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -16,11 +17,13 @@ async def live():
 
 @router.get("/ready")
 async def ready(response: Response):
-    checks = {"mysql": False, "redis": False}
+    checks = {"mysql": False, "schema": False, "redis": False}
     try:
         async with SessionLocal() as session:
             await session.execute(text("SELECT 1"))
         checks["mysql"] = True
+        actual = await read_schema_version(engine)
+        checks["schema"] = actual == EXPECTED_SCHEMA_VERSION
     except Exception:
         pass
 

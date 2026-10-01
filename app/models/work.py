@@ -37,6 +37,15 @@ def db_enum(enum_class):
     return Enum(enum_class, values_callable=lambda cls: [v.value for v in cls], native_enum=True)
 
 
+class SchemaVersion(Base):
+    __tablename__ = "schema_version"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    applied_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
 class Series(Base):
     __tablename__ = "series"
     id: Mapped[str] = mapped_column(String(32), primary_key=True)

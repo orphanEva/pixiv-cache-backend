@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     database_url: str = "mysql+asyncmy://pixiv:pixiv@localhost:3306/pixiv_archive?charset=utf8mb4"
     redis_url: str = "redis://localhost:6379/0"
     storage_root: Path = Path("./data/pixiv")
+    schema_check_on_startup: bool = True
 
     # Manual credentials remain supported. AUTO_AUTH can populate missing/expired
     # derived credentials from PIXIV_USERNAME/PIXIV_PASSWORD instead.
@@ -26,12 +27,15 @@ class Settings(BaseSettings):
 
     api_key: str = ""
     remote_check_ttl_seconds: int = 0
+    pixiv_deep_image_check: bool = False
     lock_ttl_seconds: int = 180
     lock_wait_seconds: int = 30
     serve_stale_on_remote_unavailable: bool = True
     max_asset_bytes: int = 150 * 1024 * 1024
+    storage_audit_max_findings: int = 200
     download_timeout_seconds: int = 120
     ugoira_generate_mp4: bool = True
+    ugoira_keep_extracted_frames: bool = False
     ugoira_prefer_original: bool = True
     ugoira_max_frames: int = 10000
     ugoira_max_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024

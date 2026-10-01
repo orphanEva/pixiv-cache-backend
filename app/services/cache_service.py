@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 from app.clients.base import PixivClient
 from app.core.config import get_settings
 from app.core.security import cache_read_allowed
+from app.core.redis_lock import RenewingRedisLock
 from app.core.errors import (
     PixivAuthError, PixivNotFoundError, PixivRemoteError,
     PixivRestrictedError, PixivUnavailableError,
@@ -90,10 +91,11 @@ class CacheService:
             if (now_utc() - utc_naive(work.last_checked_at)).total_seconds() < self.settings.remote_check_ttl_seconds:
                 return self._to_response(work, "local-recently-validated")
 
-        lock = self.redis.lock(
+        lock = RenewingRedisLock(
+            self.redis,
             f"pixiv-cache:{work_type.value}:{pixiv_id}",
-            timeout=self.settings.lock_ttl_seconds,
-            blocking_timeout=self.settings.lock_wait_seconds,
+            ttl_seconds=self.settings.lock_ttl_seconds,
+            wait_seconds=self.settings.lock_wait_seconds,
         )
         if not await lock.acquire():
             work = await self._load(pixiv_id, work_type)
@@ -129,13 +131,55 @@ class CacheService:
                     return self._to_response(work, "local-stale-remote-error")
                 raise
 
-            if work and work.version_token == snapshot.version_token:
+            lock.ensure_alive()
+            token_unchanged = bool(
+                work and work.version_token == snapshot.version_token
+            )
+            binary_unchanged = True
+            if (
+                token_unchanged
+                and self.settings.pixiv_deep_image_check
+                and snapshot.work_type in (WorkType.ILLUST, WorkType.MANGA)
+            ):
+                current_version = next(
+                    (
+                        version
+                        for version in work.versions
+                        if version.version_no == work.current_version_no
+                    ),
+                    None,
+                )
+                try:
+                    binary_unchanged = bool(
+                        current_version
+                        and await self.storage.remote_images_match(
+                            snapshot, current_version.assets
+                        )
+                    )
+                except PixivUnavailableError as exc:
+                    await self._mark_remote_status(
+                        work, WorkStatus.UNAVAILABLE, str(exc)
+                    )
+                    if self.settings.serve_stale_on_remote_unavailable:
+                        return self._to_response(
+                            work, "local-stale-deep-check-unavailable"
+                        )
+                    raise
+
+            if token_unchanged and binary_unchanged:
                 work.status = WorkStatus.ACTIVE
                 work.status_reason = None
                 work.last_checked_at = now_utc()
+                lock.ensure_alive()
                 await self.session.commit()
                 work = await self._load(pixiv_id, work_type)
                 return self._to_response(work, "local-validated")
+
+            if token_unchanged and not binary_unchanged:
+                logger.info(
+                    "remote_image_bytes_changed",
+                    extra={"pixiv_id": pixiv_id, "work_type": snapshot.work_type.value},
+                )
 
             new_no = 1 if work is None else work.current_version_no + 1
             storage_path = ""
@@ -205,6 +249,7 @@ class CacheService:
                         size_bytes=item["size_bytes"],
                     ))
                 await self._sync_tags(str(pixiv_id), snapshot.tags)
+                lock.ensure_alive()
                 await self.session.commit()
                 committed = True
             except Exception:
@@ -218,10 +263,7 @@ class CacheService:
             logger.info("cache_materialized", extra={"pixiv_id": pixiv_id, "work_type": snapshot.work_type.value, "version": new_no, "source": source})
             return self._to_response(work, source)
         finally:
-            try:
-                await lock.release()
-            except Exception:
-                logger.warning("cache_lock_release_failed", exc_info=True)
+            await lock.release()
 
     async def _sync_series(self, snapshot: RemoteSnapshot) -> None:
         if not snapshot.series_id:
