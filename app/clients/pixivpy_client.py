@@ -92,6 +92,17 @@ class PixivPyClient(PixivClient):
             result = await self._invoke_api(func, *args)
             self._raise_for_pixiv_error(result)
             return result
+        except PixivAuthError:
+            self._next_auth_at = 0.0
+            await self._ensure_auth(force=True)
+            try:
+                result = await self._invoke_api(func, *args)
+                self._raise_for_pixiv_error(result)
+                return result
+            except PixivRemoteError:
+                raise
+            except Exception as retry_exc:
+                self._raise_mapped_exception(retry_exc)
         except PixivRemoteError:
             raise
         except Exception as exc:
