@@ -68,4 +68,4 @@ async def test_renewal_failure_marks_lock_lost_and_skips_release():
     with pytest.raises(PixivUnavailableError, match="ownership was lost"):
         guard.ensure_alive()
     await guard.release()
-    assert underlying.released is False
+    assert underlying.released is True

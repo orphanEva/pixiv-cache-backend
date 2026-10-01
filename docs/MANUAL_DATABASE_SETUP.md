@@ -4,8 +4,8 @@
 production database, table, or migration record at runtime.
 
 1. Review [sql/pixiv_archive.sql](../sql/pixiv_archive.sql). It is the new
-   canonical DDL based on the supplied seven-table design with additions
-   needed for reliable immutable version history.
+   canonical DDL based on the supplied seven archive tables plus the
+   `schema_version` metadata table used to verify manual upgrades.
 2. Open your MySQL administrator client (Navicat/DataGrip/mysql CLI),
    and manually run the SQL **once on a new database**.
 3. Create your own restricted application user. For example, update the
@@ -21,8 +21,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON pixiv_archive.* TO 'pixiv'@'YOUR_API_HOS
    URL-encode reserved password characters; do not commit your `.env`.
 5. Supply a private Pixiv refresh token and an API key of at least 32
    random characters; start with `docker compose up -d --build`.
-6. Verify `curl http://127.0.0.1:18081/health/ready` reports
-   MySQL and Redis connectivity.
+6. Verify `curl http://127.0.0.1:18081/health/ready` reports MySQL, schema and
+   Redis readiness.
 
 ## Existing installations or imported data
 
@@ -39,3 +39,18 @@ data/file migration, with a full backup and rollback plan.
 The API account needs only DML privileges. Production containers do
 not execute Alembic or run `CREATE TABLE`. CI initialization is
 intentionally restricted to the disposable GitHub Actions MySQL.
+
+
+## Manual schema upgrades
+
+Runtime containers never execute DDL. If an existing archive was initialized
+from the pre-v1.1 DDL (seven archive tables but no `schema_version` table),
+apply this once with an administrator account:
+
+```text
+sql/upgrades/v1_to_v2.sql
+```
+
+After that, the runtime DML-only user only needs to read
+`schema_version`. Application startup checks that the database version equals
+the version required by the running code and refuses to start on mismatch.

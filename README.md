@@ -18,8 +18,9 @@ your old dump. Back up the original schema and media first. The old
 three-table `pixiv_cache` layout and the originally supplied seven-table
 dump are *different schemas* and need an explicit, reviewed data migration.
 
-Seven tables:
+Seven archive tables plus one metadata table:
 
+- `schema_version`: manually applied database schema version (metadata only)
 - `works`: current work metadata, fingerprint, accessibility, current version
 - `series`: series metadata
 - `tags` and `work_tag_relation`: searchable current tags
@@ -115,8 +116,10 @@ Database file types:
 - `cover`: still preview image
 
 `UGOIRA_GENERATE_MP4=false` disables only the derived MP4. Raw archival still
-succeeds. `UGOIRA_MAX_FRAMES` and `UGOIRA_MAX_UNCOMPRESSED_BYTES` protect
-against malformed or unexpectedly huge ZIP archives.
+succeeds. Extracted frames are temporary by default; set
+`UGOIRA_KEEP_EXTRACTED_FRAMES=true` only if you explicitly want to retain them.
+`UGOIRA_MAX_FRAMES` and `UGOIRA_MAX_UNCOMPRESSED_BYTES` protect against malformed
+or unexpectedly huge ZIP archives.
 
 
 ## Pixiv dual authentication
@@ -200,3 +203,38 @@ Explicitly ask the backend to recover both credentials:
 curl -X POST -H "X-API-Key: $API_KEY" \
   http://127.0.0.1:18081/api/admin/pixiv/auth/refresh
 ```
+
+
+## v1.1 stability controls
+
+The backend now renews Redis cache locks while long downloads/transcodes are
+running. If lock ownership is lost, the database transaction is refused before
+commit.
+
+Set `PIXIV_DEEP_IMAGE_CHECK=true` to re-download still images when metadata
+appears unchanged and compare SHA-256 against the current archive. This catches
+the rare case where Pixiv replaces bytes behind the same URL/metadata at the cost
+of additional bandwidth.
+
+Run a read-only storage consistency audit with:
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "http://127.0.0.1:18081/api/admin/cache/storage/reconcile?verify_hash=false"
+```
+
+Use `verify_hash=true` for a full SHA-256 audit. The endpoint reports missing
+registered files, hash mismatches, orphan version directories, stale `.part`
+files, and paths outside the configured storage root. It never deletes files.
+
+### Manual schema versions
+
+New databases should always use the current `sql/pixiv_archive.sql`. Existing
+v1 archive databases must manually apply:
+
+```text
+sql/upgrades/v1_to_v2.sql
+```
+
+before starting v1.1. The application verifies `schema_version` on startup but
+does not execute schema changes itself.

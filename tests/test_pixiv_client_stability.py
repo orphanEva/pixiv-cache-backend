@@ -72,3 +72,26 @@ async def test_error_payload_from_sdk_is_checked(monkeypatch):
 
     with pytest.raises(PixivNotFoundError):
         await client._call(returns_business_error)
+
+
+@pytest.mark.asyncio
+async def test_business_auth_error_payload_retries_after_forced_auth(monkeypatch):
+    client = PixivPyClient()
+    client.refresh_token = "token"
+    client._next_auth_at = 10**12
+    calls = {"api": 0, "auth": 0}
+
+    async def fake_ensure_auth(force=False):
+        if force:
+            calls["auth"] += 1
+
+    def payload_call():
+        calls["api"] += 1
+        if calls["api"] == 1:
+            return {"error": {"message": "401 unauthorized access token"}}
+        return {"error": False, "ok": True}
+
+    monkeypatch.setattr(client, "_ensure_auth", fake_ensure_auth)
+    result = await client._call(payload_call)
+    assert result["ok"] is True
+    assert calls == {"api": 2, "auth": 1}
