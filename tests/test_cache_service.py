@@ -12,6 +12,7 @@ from app.services.cache_service import CacheService
 
 class FakeLock:
     async def acquire(self): return True
+    async def extend(self, ttl, replace_ttl=False): return True
     async def release(self): return None
 
 
