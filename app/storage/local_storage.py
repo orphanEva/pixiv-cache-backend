@@ -140,6 +140,9 @@ class LocalStorage:
                 )
                 mp4_path.unlink(missing_ok=True)
 
+        if not self.settings.ugoira_keep_extracted_frames:
+            shutil.rmtree(target / "frames", ignore_errors=True)
+
         return assets
 
     def _extract_ugoira_frames(

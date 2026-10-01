@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     max_asset_bytes: int = 150 * 1024 * 1024
     download_timeout_seconds: int = 120
     ugoira_generate_mp4: bool = True
+    ugoira_keep_extracted_frames: bool = False
     ugoira_prefer_original: bool = True
     ugoira_max_frames: int = 10000
     ugoira_max_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024
