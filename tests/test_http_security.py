@@ -25,6 +25,7 @@ class Session:
 
 
 def test_key_blocks_all_non_health_routes(monkeypatch):
+    monkeypatch.setattr(main.settings, "schema_check_on_startup", False)
     monkeypatch.setattr(main.settings, "api_key", "S" * 32)
     client = TestClient(main.app)
     assert client.get("/health/live").status_code == 200
@@ -34,6 +35,7 @@ def test_key_blocks_all_non_health_routes(monkeypatch):
 
 
 def test_no_key_fails_closed(monkeypatch):
+    monkeypatch.setattr(main.settings, "schema_check_on_startup", False)
     monkeypatch.setattr(main.settings, "api_key", "")
     client = TestClient(main.app)
     assert client.get("/health/live").status_code == 200

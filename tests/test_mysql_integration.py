@@ -1,7 +1,7 @@
 """Integration tests run ONLY against disposable CI MySQL+Redis after manual DDL."""
 from pathlib import Path
 import pytest
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 
 from app.clients.base import PixivClient
 from app.core.config import get_settings
@@ -186,3 +186,13 @@ async def test_mysql_accepts_ugoira_archive_file_types():
         )).scalars().all()
         assert set(history_types) == {"ugoira_zip", "ugoira_meta", "ugoira_mp4"}
         assert set(current_types) == {"ugoira_zip", "ugoira_meta", "ugoira_mp4"}
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_manual_ddl_records_expected_schema_version():
+    from app.core.schema_version import EXPECTED_SCHEMA_VERSION
+    async with SessionLocal() as session:
+        actual = (await session.execute(
+            text("SELECT version FROM schema_version WHERE id = 1")
+        )).scalar_one()
+        assert actual == EXPECTED_SCHEMA_VERSION
