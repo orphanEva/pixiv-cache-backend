@@ -5,6 +5,15 @@
 CREATE DATABASE IF NOT EXISTS pixiv_archive CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE pixiv_archive;
 
+CREATE TABLE schema_version (
+  id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+  version INT UNSIGNED NOT NULL,
+  applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT chk_schema_version_singleton CHECK (id = 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO schema_version (id, version) VALUES (1, 2);
+
 CREATE TABLE series (
   id VARCHAR(32) NOT NULL PRIMARY KEY,
   type ENUM('novel','manga') NOT NULL,

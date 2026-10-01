@@ -15,6 +15,7 @@ from app.core.logging import configure_logging, request_id_ctx
 from app.core.security import authorized
 from app.db.session import engine
 from app.core.redis_client import close_redis
+from app.core.schema_version import ensure_schema_version
 
 settings = get_settings()
 settings.storage_root.mkdir(parents=True, exist_ok=True)
@@ -24,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if settings.schema_check_on_startup:
+        version = await ensure_schema_version(engine)
+        logger.info("schema_version_verified", extra={"schema_version": version})
     logger.info("application_started")
     yield
     await close_redis()
@@ -31,7 +35,7 @@ async def lifespan(app: FastAPI):
     logger.info("application_stopped")
 
 
-app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.1.0", lifespan=lifespan)
 
 
 @app.middleware("http")

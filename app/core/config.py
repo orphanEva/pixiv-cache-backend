@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     database_url: str = "mysql+asyncmy://pixiv:pixiv@localhost:3306/pixiv_archive?charset=utf8mb4"
     redis_url: str = "redis://localhost:6379/0"
     storage_root: Path = Path("./data/pixiv")
+    schema_check_on_startup: bool = True
 
     # Manual credentials remain supported. AUTO_AUTH can populate missing/expired
     # derived credentials from PIXIV_USERNAME/PIXIV_PASSWORD instead.
