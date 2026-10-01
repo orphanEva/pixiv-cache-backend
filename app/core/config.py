@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     api_key: str = ""
     remote_check_ttl_seconds: int = 0
+    pixiv_deep_image_check: bool = False
     lock_ttl_seconds: int = 180
     lock_wait_seconds: int = 30
     serve_stale_on_remote_unavailable: bool = True

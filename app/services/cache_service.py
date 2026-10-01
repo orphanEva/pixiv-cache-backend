@@ -132,13 +132,54 @@ class CacheService:
                 raise
 
             lock.ensure_alive()
-            if work and work.version_token == snapshot.version_token:
+            token_unchanged = bool(
+                work and work.version_token == snapshot.version_token
+            )
+            binary_unchanged = True
+            if (
+                token_unchanged
+                and self.settings.pixiv_deep_image_check
+                and snapshot.work_type in (WorkType.ILLUST, WorkType.MANGA)
+            ):
+                current_version = next(
+                    (
+                        version
+                        for version in work.versions
+                        if version.version_no == work.current_version_no
+                    ),
+                    None,
+                )
+                try:
+                    binary_unchanged = bool(
+                        current_version
+                        and await self.storage.remote_images_match(
+                            snapshot, current_version.assets
+                        )
+                    )
+                except PixivUnavailableError as exc:
+                    await self._mark_remote_status(
+                        work, WorkStatus.UNAVAILABLE, str(exc)
+                    )
+                    if self.settings.serve_stale_on_remote_unavailable:
+                        return self._to_response(
+                            work, "local-stale-deep-check-unavailable"
+                        )
+                    raise
+
+            if token_unchanged and binary_unchanged:
                 work.status = WorkStatus.ACTIVE
                 work.status_reason = None
                 work.last_checked_at = now_utc()
+                lock.ensure_alive()
                 await self.session.commit()
                 work = await self._load(pixiv_id, work_type)
                 return self._to_response(work, "local-validated")
+
+            if token_unchanged and not binary_unchanged:
+                logger.info(
+                    "remote_image_bytes_changed",
+                    extra={"pixiv_id": pixiv_id, "work_type": snapshot.work_type.value},
+                )
 
             new_no = 1 if work is None else work.current_version_no + 1
             storage_path = ""

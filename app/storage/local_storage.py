@@ -12,6 +12,7 @@ from pathlib import Path
 import httpx
 
 from app.core.config import get_settings
+from app.core.errors import PixivUnavailableError
 from app.models.work import WorkType
 from app.schemas.pixiv import RemoteSnapshot, UgoiraFrame
 
@@ -46,6 +47,54 @@ class LocalStorage:
         return [self._asset(
             0, "novel_txt", path, hashlib.sha256(data).hexdigest(), len(data), None
         )]
+
+    async def remote_images_match(self, snapshot: RemoteSnapshot, existing_assets) -> bool:
+        """Deep-check remote still-image bytes against the current archived hashes."""
+        expected = {
+            int(asset.page_index): str(asset.sha256 or "").lower()
+            for asset in existing_assets
+            if getattr(asset, "file_type", None) == "image"
+        }
+        if len(expected) != len(snapshot.assets):
+            return False
+        try:
+            async with self._http_client() as client:
+                for asset in snapshot.assets:
+                    expected_sha = expected.get(asset.page_index)
+                    if not expected_sha:
+                        return False
+                    actual_sha, _ = await self._hash_remote_image(client, asset.url)
+                    if actual_sha.lower() != expected_sha:
+                        return False
+            return True
+        except (httpx.HTTPError, ValueError) as exc:
+            raise PixivUnavailableError(
+                f"Deep image validation failed: {exc.__class__.__name__}"
+            ) from exc
+
+    async def _hash_remote_image(
+        self, client: httpx.AsyncClient, url: str
+    ) -> tuple[str, int]:
+        sha = hashlib.sha256()
+        size = 0
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            content_type = (
+                response.headers.get("content-type") or ""
+            ).split(";", 1)[0].lower()
+            if content_type and not content_type.startswith("image/"):
+                raise ValueError(
+                    f"Unexpected Pixiv image content-type: {content_type}"
+                )
+            declared = response.headers.get("content-length")
+            if declared and int(declared) > self.settings.max_asset_bytes:
+                raise ValueError("Pixiv image exceeds configured size limit")
+            async for chunk in response.aiter_bytes(1024 * 1024):
+                size += len(chunk)
+                if size > self.settings.max_asset_bytes:
+                    raise ValueError("Pixiv image exceeds configured size limit")
+                sha.update(chunk)
+        return sha.hexdigest(), size
 
     async def _write_images(self, snapshot: RemoteSnapshot, target: Path) -> list[dict]:
         assets: list[dict] = []
