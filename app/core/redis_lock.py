@@ -80,8 +80,6 @@ class RenewingRedisLock:
             except asyncio.CancelledError:
                 pass
             self._renew_task = None
-        if self._lost:
-            return
         try:
             await self.lock.release()
         except Exception:
