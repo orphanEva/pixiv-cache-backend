@@ -15,6 +15,7 @@ def test_archive_schema_contract():
         "work_history_files",
         "work_tag_relation",
         "sync_sources",
+        "work_sources",
     }
     assert set(Base.metadata.tables) == expected
     sql = Path("sql/pixiv_archive.sql").read_text()
@@ -41,6 +42,13 @@ def test_manual_v2_to_v3_upgrade_exists():
     sql = Path("sql/upgrades/v2_to_v3.sql").read_text()
     assert "CREATE TABLE sync_sources" in sql
     assert "SET version = 3" in sql
+    assert "DROP TABLE" not in sql
+
+
+def test_manual_v3_to_v4_upgrade_exists():
+    sql = Path("sql/upgrades/v3_to_v4.sql").read_text()
+    assert "CREATE TABLE work_sources" in sql
+    assert "SET version = 4" in sql
     assert "DROP TABLE" not in sql
 
 
