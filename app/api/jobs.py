@@ -36,6 +36,7 @@ async def enqueue_archive_job(
     pixiv_id: int,
     force_refresh: bool = Query(True),
 ):
+    """创建一个异步归档任务；长下载和转码由 archive worker 执行。"""
     return await queue().enqueue(
         kind,
         pixiv_id,
