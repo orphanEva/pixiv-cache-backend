@@ -73,6 +73,10 @@ class LibraryService:
         source_id: int | None = None,
         is_ai: bool | None = None,
         x_restrict: int | None = None,
+        cached_from=None,
+        cached_to=None,
+        remote_created_from=None,
+        remote_created_to=None,
         search_novel_text: bool = False,
         sort: str = "cached_at",
         order: str = "desc",
@@ -101,6 +105,14 @@ class LibraryService:
             conditions.append(PixivWork.is_ai.is_(is_ai))
         if x_restrict is not None:
             conditions.append(PixivWork.x_restrict == x_restrict)
+        if cached_from is not None:
+            conditions.append(PixivWork.cached_at >= cached_from)
+        if cached_to is not None:
+            conditions.append(PixivWork.cached_at <= cached_to)
+        if remote_created_from is not None:
+            conditions.append(PixivWork.remote_created_at >= remote_created_from)
+        if remote_created_to is not None:
+            conditions.append(PixivWork.remote_created_at <= remote_created_to)
         if source_id is not None:
             conditions.append(
                 exists(
@@ -684,6 +696,14 @@ class LibraryService:
                 )
             )
         ).one()
+        archived_files, archive_bytes = (
+            await self.session.execute(
+                select(
+                    func.count(PixivAsset.id),
+                    func.coalesce(func.sum(PixivAsset.size_bytes), 0),
+                )
+            )
+        ).one()
         sync_sources = (
             await self.session.execute(
                 select(func.count()).select_from(SyncSource)
@@ -708,6 +728,8 @@ class LibraryService:
             versions=int(versions),
             current_files=int(current_files),
             current_storage_bytes=int(current_bytes),
+            archived_files=int(archived_files),
+            archive_storage_bytes=int(archive_bytes),
             sync_sources=int(sync_sources),
             source_links=int(source_links),
         )

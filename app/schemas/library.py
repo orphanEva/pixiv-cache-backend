@@ -159,5 +159,7 @@ class LibraryStats(BaseModel):
     versions: int
     current_files: int
     current_storage_bytes: int
+    archived_files: int
+    archive_storage_bytes: int
     sync_sources: int
     source_links: int
