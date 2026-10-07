@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 from urllib.parse import quote
 
-from sqlalchemy import and_, case, exists, func, or_, select
+from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -24,6 +24,7 @@ from app.models.work import (
     WorkTagRelation,
     WorkType,
 )
+from app.services.cache_service import utc_naive
 from app.schemas.library import (
     AuthorList,
     AuthorSummary,
@@ -106,13 +107,17 @@ class LibraryService:
         if x_restrict is not None:
             conditions.append(PixivWork.x_restrict == x_restrict)
         if cached_from is not None:
-            conditions.append(PixivWork.cached_at >= cached_from)
+            conditions.append(PixivWork.cached_at >= utc_naive(cached_from))
         if cached_to is not None:
-            conditions.append(PixivWork.cached_at <= cached_to)
+            conditions.append(PixivWork.cached_at <= utc_naive(cached_to))
         if remote_created_from is not None:
-            conditions.append(PixivWork.remote_created_at >= remote_created_from)
+            conditions.append(
+                PixivWork.remote_created_at >= utc_naive(remote_created_from)
+            )
         if remote_created_to is not None:
-            conditions.append(PixivWork.remote_created_at <= remote_created_to)
+            conditions.append(
+                PixivWork.remote_created_at <= utc_naive(remote_created_to)
+            )
         if source_id is not None:
             conditions.append(
                 exists(
