@@ -305,3 +305,47 @@ storage root.
 
 This v1.2 worker/storage change does **not** require a new MySQL schema version.
 Schema version remains v2.
+
+
+## v1.3 maintenance and disaster recovery
+
+Compose now runs a separate `maintenance` container. By default it performs a
+read-only storage/DB integrity audit every six hours. It does not hash every
+large asset and does not repair anything unless explicitly configured:
+
+```env
+INTEGRITY_AUDIT_INTERVAL_SECONDS=21600
+INTEGRITY_AUDIT_VERIFY_HASH=false
+INTEGRITY_AUDIT_REPAIR_SAFE=false
+```
+
+A complete backup contains the MySQL logical dump plus the canonical archive
+directories (`illust/manga/ugoira/novel`). Pixiv auth caches, quarantine data
+and Redis job state are deliberately excluded.
+
+Create and verify a backup while the service is running:
+
+```sh
+docker compose exec api python -m app.maintenance.backup create --name daily
+docker compose exec api python -m app.maintenance.backup verify /data/pixiv/.backups/daily
+```
+
+Backup creation acquires a global maintenance freeze, pauses new archive writes,
+waits for current per-work writers to finish, then snapshots DB + files.
+
+Restore is deliberately destructive and requires an explicit flag. For a real
+restore, stop request/worker containers first and provide a privileged
+`MAINTENANCE_DATABASE_URL` capable of recreating archive tables:
+
+```sh
+docker compose stop api worker maintenance
+docker compose run --rm api python -m app.maintenance.backup restore \
+  /data/pixiv/.backups/daily --confirm-destructive-restore
+docker compose up -d
+```
+
+Before applying the requested restore, the CLI automatically takes a
+pre-restore database dump. If the target DB restore fails, it attempts to put
+that DB dump back and rolls storage directories back to their previous state.
+
+The MySQL schema remains **v2**; v1.3 adds operational tooling only.
