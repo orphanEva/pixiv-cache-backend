@@ -77,3 +77,66 @@ async def test_storage_audit_is_clean_for_registered_file(tmp_path: Path):
         assert result["ok"] is True
     finally:
         settings.storage_root = old_root
+
+
+@pytest.mark.asyncio
+async def test_safe_repair_deletes_stale_parts_and_quarantines_orphans(tmp_path: Path):
+    import os
+    import time
+
+    settings = get_settings()
+    old = {
+        "storage_root": settings.storage_root,
+        "storage_part_stale_seconds": settings.storage_part_stale_seconds,
+        "storage_orphan_grace_seconds": settings.storage_orphan_grace_seconds,
+    }
+    settings.storage_root = tmp_path
+    settings.storage_part_stale_seconds = 1
+    settings.storage_orphan_grace_seconds = 1
+    try:
+        orphan = tmp_path / "illust/999/versions/7"
+        orphan.mkdir(parents=True)
+        payload = orphan / "orphan.jpg"
+        payload.write_bytes(b"orphan")
+        part = orphan / "download.part"
+        part.write_bytes(b"partial")
+        old_time = time.time() - 60
+        os.utime(payload, (old_time, old_time))
+        os.utime(part, (old_time, old_time))
+        os.utime(orphan, (old_time, old_time))
+
+        result = await StorageIntegrityService(Session([])).audit(
+            repair_safe=True
+        )
+        assert result["repair_safe"] is True
+        assert not part.exists()
+        assert not orphan.exists()
+        quarantined = result["repairs"]["quarantined_orphan_version_dirs"]
+        assert len(quarantined) == 1
+        assert Path(quarantined[0]).exists()
+        assert result["after"]["orphan_version_dirs"] == []
+        assert result["after"]["part_files"] == []
+    finally:
+        for key, value in old.items():
+            setattr(settings, key, value)
+
+
+@pytest.mark.asyncio
+async def test_safe_repair_skips_recent_orphan(tmp_path: Path):
+    settings = get_settings()
+    old_root = settings.storage_root
+    old_grace = settings.storage_orphan_grace_seconds
+    settings.storage_root = tmp_path
+    settings.storage_orphan_grace_seconds = 3600
+    try:
+        orphan = tmp_path / "illust/888/versions/1"
+        orphan.mkdir(parents=True)
+        (orphan / "active.part").write_bytes(b"active")
+        result = await StorageIntegrityService(Session([])).audit(
+            repair_safe=True
+        )
+        assert orphan.exists()
+        assert str(orphan.resolve()) in result["repairs"]["skipped_recent"]
+    finally:
+        settings.storage_root = old_root
+        settings.storage_orphan_grace_seconds = old_grace
