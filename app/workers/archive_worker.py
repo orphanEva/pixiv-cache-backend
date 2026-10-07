@@ -27,23 +27,32 @@ class ArchiveWorker:
         self.client = PixivPyClient()
         self.stop_event = asyncio.Event()
         self.consumer = f"{socket.gethostname()}-{os.getpid()}"
+        self._heartbeat_task: asyncio.Task | None = None
 
     async def run(self) -> None:
         if self.settings.schema_check_on_startup:
             await ensure_schema_version(engine)
         await self.queue.ensure_group()
         logger.info("archive_worker_started", extra={"consumer": self.consumer})
-
-        while not self.stop_event.is_set():
-            await self._heartbeat()
-            item = await self.queue.read_one(
-                self.consumer,
-                block_ms=self.settings.archive_worker_block_ms,
-            )
-            if item is None:
-                continue
-            stream_id, job_id = item
-            await self._process(stream_id, job_id)
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        try:
+            while not self.stop_event.is_set():
+                item = await self.queue.read_one(
+                    self.consumer,
+                    block_ms=self.settings.archive_worker_block_ms,
+                )
+                if item is None:
+                    continue
+                stream_id, job_id = item
+                await self._process(stream_id, job_id)
+        finally:
+            if self._heartbeat_task is not None:
+                self._heartbeat_task.cancel()
+                try:
+                    await self._heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+                self._heartbeat_task = None
 
         logger.info("archive_worker_stopped", extra={"consumer": self.consumer})
 
@@ -62,6 +71,7 @@ class ArchiveWorker:
                 "attempts": job["attempts"],
             },
         )
+        lease_task = asyncio.create_task(self._touch_job_lease(stream_id))
         try:
             async with SessionLocal() as session:
                 service = CacheService(session, self.client, redis_client=self.redis)
@@ -84,8 +94,24 @@ class ArchiveWorker:
                 exc_info=True,
             )
         finally:
+            lease_task.cancel()
+            try:
+                await lease_task
+            except asyncio.CancelledError:
+                pass
             await self.queue.ack(stream_id)
+
+    async def _touch_job_lease(self, stream_id: str) -> None:
+        interval = max(5, self.settings.archive_job_claim_idle_ms // 3000)
+        while True:
+            await asyncio.sleep(interval)
+            await self.queue.touch(stream_id, self.consumer)
+
+    async def _heartbeat_loop(self) -> None:
+        interval = max(2, self.settings.archive_worker_heartbeat_ttl_seconds // 3)
+        while True:
             await self._heartbeat()
+            await asyncio.sleep(interval)
 
     async def _heartbeat(self) -> None:
         await self.redis.set(

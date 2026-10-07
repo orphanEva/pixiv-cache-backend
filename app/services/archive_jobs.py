@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -79,12 +80,14 @@ class ArchiveJobQueue:
             nx=True,
         )
         if not claimed:
-            existing_id = await self.redis.get(dedupe)
-            if existing_id:
-                existing = await self.get(existing_id)
-                if existing:
-                    existing["deduplicated"] = True
-                    return existing
+            for _ in range(5):
+                existing_id = await self.redis.get(dedupe)
+                if existing_id:
+                    existing = await self.get(existing_id)
+                    if existing:
+                        existing["deduplicated"] = True
+                        return existing
+                await asyncio.sleep(0.01)
             raise RuntimeError("Archive job deduplication race could not be resolved")
 
         now = utc_iso()
@@ -241,6 +244,17 @@ class ArchiveJobQueue:
         stream_id, fields = messages[0]
         job_id = fields.get("job_id")
         return (stream_id, job_id) if job_id else None
+
+    async def touch(self, stream_id: str, consumer: str) -> None:
+        """Refresh pending idle time while a long-running job is still alive."""
+        await self.redis.xclaim(
+            self.stream,
+            self.group,
+            consumer,
+            min_idle_time=0,
+            message_ids=[stream_id],
+            justid=True,
+        )
 
     async def ack(self, stream_id: str) -> None:
         async with self.redis.pipeline(transaction=True) as pipe:
