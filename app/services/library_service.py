@@ -343,7 +343,7 @@ class LibraryService:
             return None
         root = self.settings.storage_root.resolve()
         findings = []
-        ok = True
+        ok = bool(work.current_files)
         for item in sorted(
             work.current_files,
             key=lambda value: (value.page_index, value.file_type),
@@ -382,6 +382,7 @@ class LibraryService:
             "version": work.current_version_no,
             "ok": ok,
             "verify_hash": verify_hash,
+            "registered_files": len(work.current_files),
             "files": findings,
         }
 
