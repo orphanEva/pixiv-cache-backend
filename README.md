@@ -22,6 +22,7 @@ Seven archive tables plus schema/synchronization metadata:
 
 - `schema_version`: manually applied database schema version (metadata only)
 - `sync_sources`: persistent author/bookmark synchronization subscriptions
+- `work_sources`: many-to-many attribution from archived works to sync sources
 - `works`: current work metadata, fingerprint, accessibility, current version
 - `series`: series metadata
 - `tags` and `work_tag_relation`: searchable current tags
@@ -78,6 +79,18 @@ All non-health routes require an `X-API-Key` header.
 - `GET /api/sync/sources`
 - `POST /api/sync/sources/{id}/run`
 - `GET /api/sync/jobs/{job_id}`
+- `GET /api/library/works`
+- `GET /api/library/works/{pixiv_id}`
+- `GET /api/library/works/{pixiv_id}/history`
+- `GET /api/library/works/{pixiv_id}/versions/{version}`
+- `POST /api/library/works/{pixiv_id}/refresh`
+- `GET /api/library/works/{pixiv_id}/integrity`
+- `GET /api/library/authors`
+- `GET /api/library/authors/{author_id}`
+- `GET /api/library/tags`
+- `GET /api/library/series`
+- `GET /api/library/series/{series_id}`
+- `GET /api/library/stats`
 
 `refresh=true` checks upstream according to
 `REMOTE_CHECK_TTL_SECONDS` (0 checks each request). `refresh=false`
@@ -433,3 +446,78 @@ sql/upgrades/v2_to_v3.sql
 ```
 
 Runtime containers still execute no DDL automatically.
+
+
+## v1.5 API-first library
+
+The library layer is designed to be useful directly from scripts and other
+services; a browser frontend is optional.
+
+Typical filtered query:
+
+```sh
+curl -G -H "X-API-Key: $API_KEY" \
+  --data-urlencode "q=纳西妲" \
+  --data-urlencode "type=illust" \
+  --data-urlencode "type=ugoira" \
+  --data-urlencode "tag=原神" \
+  --data-urlencode "page=1" \
+  --data-urlencode "page_size=50" \
+  http://127.0.0.1:18081/api/library/works
+```
+
+Every list response uses:
+
+```json
+{
+  "items": [],
+  "pagination": {
+    "page": 1,
+    "page_size": 50,
+    "total": 0,
+    "pages": 0
+  }
+}
+```
+
+Work summaries contain tags, source IDs, current file count/size and archive
+status. Work detail can optionally include novel content, raw Pixiv metadata,
+or server-local paths:
+
+```text
+GET /api/library/works/123?include_content=true&include_raw_meta=true
+```
+
+By default local filesystem paths are omitted. Files expose a relative
+`download_url`; use the same `X-API-Key` header when downloading it.
+
+Management actions are intentionally conservative:
+
+- queue a refresh: `POST /api/library/works/{id}/refresh`
+- verify current files: `GET /api/library/works/{id}/integrity?verify_hash=true`
+
+v1.5 does not expose a destructive delete endpoint.
+
+### Work source attribution
+
+One work can belong to multiple sync sources. For example the same Pixiv work
+may be discovered through both an author subscription and your public
+bookmarks. Redis archive-job deduplication merges those source IDs and
+`work_sources` records all of them after archival succeeds.
+
+Filter by source:
+
+```text
+GET /api/library/works?source_id=12
+```
+
+### Schema v4
+
+New empty databases use the current `sql/pixiv_archive.sql`. Existing
+schema-v3 installations must manually apply:
+
+```text
+sql/upgrades/v3_to_v4.sql
+```
+
+Runtime containers still perform no automatic DDL.

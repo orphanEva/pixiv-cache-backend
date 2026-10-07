@@ -68,3 +68,19 @@ sql/upgrades/v2_to_v3.sql
 After the script succeeds, `schema_version.id=1` must contain `version=3`.
 For a database that predates schema versioning, apply `v1_to_v2.sql` first,
 then `v2_to_v3.sql`. Runtime containers never execute either script.
+
+
+### v3 -> v4
+
+v1.5 adds `work_sources` so one archived work can retain every synchronization
+source that discovered it.
+
+Existing schema-v3 databases must apply:
+
+```text
+sql/upgrades/v3_to_v4.sql
+```
+
+After the script succeeds, `schema_version.id=1` must contain `version=4`.
+For older installations, apply the upgrade scripts in order. Runtime containers
+never execute these scripts automatically.
