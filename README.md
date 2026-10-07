@@ -68,7 +68,10 @@ All non-health routes require an `X-API-Key` header.
 - `GET /api/novel/{pixiv_id}/versions/{number}`
 - `GET /api/admin/cache/status`
 - `GET /api/admin/cache/{kind}/{id}`
-- `POST /api/admin/cache/{kind}/{id}/refresh`
+- `POST /api/admin/cache/{kind}/{id}/refresh` (queues a worker job)
+- `POST /api/jobs/archive/{kind}/{id}`
+- `GET /api/jobs/{job_id}`
+- `POST /api/jobs/{job_id}/retry`
 
 `refresh=true` checks upstream according to
 `REMOTE_CHECK_TTL_SECONDS` (0 checks each request). `refresh=false`
@@ -238,3 +241,67 @@ sql/upgrades/v1_to_v2.sql
 
 before starting v1.1. The application verifies `schema_version` on startup but
 does not execute schema changes itself.
+
+
+## v1.2 archive worker
+
+Long downloads and FFmpeg transcodes can now run outside the HTTP process.
+Docker Compose starts a separate `worker` container using a durable Redis
+Stream. The API and worker share `/data/pixiv`, while MySQL remains external.
+
+Submit an archive/refresh job:
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "http://127.0.0.1:18081/api/jobs/archive/illust/123456?force_refresh=true"
+```
+
+The API returns HTTP 202 with a `job_id`. Poll it:
+
+```sh
+curl -H "X-API-Key: $API_KEY" \
+  "http://127.0.0.1:18081/api/jobs/JOB_ID"
+```
+
+Jobs move through `queued -> running -> succeeded|failed`. Requests for the
+same work are deduplicated while a job is queued/running. Failed/completed jobs
+can be explicitly resubmitted via `POST /api/jobs/{job_id}/retry`.
+
+Redis Streams are used instead of an in-memory queue. A worker crash leaves an
+unacknowledged pending message; another worker can reclaim it after the idle
+lease expires. While processing a long job, the worker periodically refreshes
+that pending lease so healthy work is not stolen.
+
+The old GET endpoints remain backward-compatible and can still refresh
+synchronously. For large Ugoira or bulk archival, prefer the job API.
+
+### Storage capacity guard
+
+The backend keeps at least `STORAGE_MIN_FREE_BYTES` free (default 2 GiB).
+Known Content-Length values and Ugoira uncompressed size are included in the
+preflight calculation. A full disk condition fails with HTTP 507 instead of
+writing until the filesystem is exhausted.
+
+### Safe reconcile repair
+
+Audit only:
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "http://127.0.0.1:18081/api/admin/cache/storage/reconcile"
+```
+
+Conservative repair:
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "http://127.0.0.1:18081/api/admin/cache/storage/reconcile?repair_safe=true"
+```
+
+Safe repair only removes sufficiently old `.part` files and moves sufficiently
+old orphan version directories under `.quarantine`. It never auto-modifies
+missing registered files, hash mismatches, database rows, or paths outside the
+storage root.
+
+This v1.2 worker/storage change does **not** require a new MySQL schema version.
+Schema version remains v2.
