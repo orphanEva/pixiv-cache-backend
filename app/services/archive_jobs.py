@@ -4,7 +4,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable
 
 from redis.exceptions import ResponseError
 
@@ -21,7 +21,7 @@ def normalize_job_kind(kind: WorkType) -> WorkType:
 
 
 class ArchiveJobQueue:
-    """Durable Redis Stream queue with hash-backed job status and deduplication."""
+    """Durable Redis Stream queue with hash status, dedupe and source attribution."""
 
     def __init__(self, redis_client) -> None:
         self.redis = redis_client
@@ -50,9 +50,63 @@ class ArchiveJobQueue:
     def status_key(self, job_id: str) -> str:
         return f"{self.status_prefix}{job_id}"
 
+    def source_key(self, job_id: str) -> str:
+        return f"{self.status_key(job_id)}:sources"
+
     def dedupe_key(self, kind: WorkType, pixiv_id: int) -> str:
         normalized = normalize_job_kind(kind)
         return f"{self.dedupe_prefix}{normalized.value}:{pixiv_id}"
+
+    @staticmethod
+    def _source_values(
+        source_id: int | None,
+        source_ids: Iterable[int] | None,
+    ) -> list[int]:
+        values = set()
+        if source_id is not None:
+            values.add(int(source_id))
+        if source_ids:
+            values.update(int(value) for value in source_ids)
+        return sorted(value for value in values if value > 0)
+
+    async def _attach_sources_if_active(
+        self,
+        job_id: str,
+        source_ids: Iterable[int],
+    ) -> bool:
+        values = list(source_ids)
+        if not values:
+            status = await self.redis.hget(self.status_key(job_id), "status")
+            return status in {"queued", "running"}
+        script = """
+local status = redis.call('HGET', KEYS[1], 'status')
+if status ~= 'queued' and status ~= 'running' then
+  return 0
+end
+for i = 1, #ARGV - 1 do
+  redis.call('SADD', KEYS[2], ARGV[i])
+end
+redis.call('EXPIRE', KEYS[2], ARGV[#ARGV])
+return 1
+"""
+        result = await self.redis.eval(
+            script,
+            2,
+            self.status_key(job_id),
+            self.source_key(job_id),
+            *[str(value) for value in values],
+            str(self.settings.archive_job_status_ttl_seconds),
+        )
+        return bool(result)
+
+    async def _delete_dedupe_if_owned(self, dedupe: str, job_id: str) -> None:
+        script = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+        await self.redis.eval(script, 1, dedupe, job_id)
 
     async def enqueue(
         self,
@@ -60,17 +114,22 @@ class ArchiveJobQueue:
         pixiv_id: int,
         *,
         force_refresh: bool = True,
+        source_id: int | None = None,
+        source_ids: Iterable[int] | None = None,
     ) -> dict[str, Any]:
         normalized = normalize_job_kind(kind)
         dedupe = self.dedupe_key(normalized, pixiv_id)
+        sources = self._source_values(source_id, source_ids)
 
         existing_id = await self.redis.get(dedupe)
         if existing_id:
-            existing = await self.get(existing_id)
-            if existing and existing["status"] in {"queued", "running"}:
-                existing["deduplicated"] = True
-                return existing
-            await self.redis.delete(dedupe)
+            active = await self._attach_sources_if_active(existing_id, sources)
+            if active:
+                existing = await self.get(existing_id)
+                if existing:
+                    existing["deduplicated"] = True
+                    return existing
+            await self._delete_dedupe_if_owned(dedupe, existing_id)
 
         job_id = uuid.uuid4().hex
         claimed = await self.redis.set(
@@ -83,12 +142,29 @@ class ArchiveJobQueue:
             for _ in range(5):
                 existing_id = await self.redis.get(dedupe)
                 if existing_id:
-                    existing = await self.get(existing_id)
-                    if existing:
-                        existing["deduplicated"] = True
-                        return existing
+                    active = await self._attach_sources_if_active(
+                        existing_id,
+                        sources,
+                    )
+                    if active:
+                        existing = await self.get(existing_id)
+                        if existing:
+                            existing["deduplicated"] = True
+                            return existing
+                    await self._delete_dedupe_if_owned(dedupe, existing_id)
+                    claimed = await self.redis.set(
+                        dedupe,
+                        job_id,
+                        ex=self.settings.archive_job_dedupe_ttl_seconds,
+                        nx=True,
+                    )
+                    if claimed:
+                        break
                 await asyncio.sleep(0.01)
-            raise RuntimeError("Archive job deduplication race could not be resolved")
+            if not claimed:
+                raise RuntimeError(
+                    "Archive job deduplication race could not be resolved"
+                )
 
         now = utc_iso()
         mapping = {
@@ -112,16 +188,36 @@ class ArchiveJobQueue:
                     self.status_key(job_id),
                     self.settings.archive_job_status_ttl_seconds,
                 )
+                if sources:
+                    pipe.sadd(
+                        self.source_key(job_id),
+                        *[str(value) for value in sources],
+                    )
+                    pipe.expire(
+                        self.source_key(job_id),
+                        self.settings.archive_job_status_ttl_seconds,
+                    )
                 pipe.xadd(self.stream, {"job_id": job_id})
                 await pipe.execute()
         except Exception:
-            await self.redis.delete(dedupe, self.status_key(job_id))
+            await self.redis.delete(
+                dedupe,
+                self.status_key(job_id),
+                self.source_key(job_id),
+            )
             raise
-        return self._decode(mapping)
+        value = self._decode(mapping)
+        value["source_ids"] = sources
+        return value
 
     async def get(self, job_id: str) -> dict[str, Any] | None:
         raw = await self.redis.hgetall(self.status_key(job_id))
-        return self._decode(raw) if raw else None
+        if not raw:
+            return None
+        value = self._decode(raw)
+        values = await self.redis.smembers(self.source_key(job_id))
+        value["source_ids"] = sorted(int(item) for item in values)
+        return value
 
     async def retry(self, job_id: str) -> dict[str, Any] | None:
         previous = await self.get(job_id)
@@ -134,6 +230,7 @@ class ArchiveJobQueue:
             WorkType(previous["kind"]),
             int(previous["pixiv_id"]),
             force_refresh=bool(previous["force_refresh"]),
+            source_ids=previous.get("source_ids") or [],
         )
 
     async def mark_running(self, job_id: str, consumer: str) -> dict[str, Any] | None:
@@ -154,7 +251,18 @@ class ArchiveJobQueue:
                 },
             )
             pipe.expire(key, self.settings.archive_job_status_ttl_seconds)
+            pipe.expire(
+                self.source_key(job_id),
+                self.settings.archive_job_status_ttl_seconds,
+            )
             await pipe.execute()
+        return await self.get(job_id)
+
+    async def mark_finalizing(self, job_id: str) -> dict[str, Any] | None:
+        key = self.status_key(job_id)
+        if not await self.redis.exists(key):
+            return None
+        await self.redis.hset(key, "status", "finalizing")
         return await self.get(job_id)
 
     async def mark_succeeded(self, job_id: str, result: dict[str, Any]) -> None:
@@ -193,10 +301,16 @@ class ArchiveJobQueue:
             current = await self.redis.get(dedupe)
             if current == job_id:
                 await self.redis.delete(dedupe)
-        await self.redis.expire(
-            self.status_key(job_id),
-            self.settings.archive_job_status_ttl_seconds,
-        )
+        async with self.redis.pipeline(transaction=True) as pipe:
+            pipe.expire(
+                self.status_key(job_id),
+                self.settings.archive_job_status_ttl_seconds,
+            )
+            pipe.expire(
+                self.source_key(job_id),
+                self.settings.archive_job_status_ttl_seconds,
+            )
+            await pipe.execute()
 
     async def read_one(
         self,
@@ -246,7 +360,6 @@ class ArchiveJobQueue:
         return (stream_id, job_id) if job_id else None
 
     async def touch(self, stream_id: str, consumer: str) -> None:
-        """Refresh pending idle time while a long-running job is still alive."""
         await self.redis.xclaim(
             self.stream,
             self.group,
@@ -269,7 +382,9 @@ class ArchiveJobQueue:
             if key in value and value[key] != "":
                 value[key] = int(value[key])
         if "force_refresh" in value:
-            value["force_refresh"] = value["force_refresh"] in (True, 1, "1", "true", "True")
+            value["force_refresh"] = value["force_refresh"] in (
+                True, 1, "1", "true", "True"
+            )
         result = value.get("result")
         if result:
             try:

@@ -8,7 +8,7 @@ from app.clients.base import PixivClient
 from app.core.config import get_settings
 from app.core.redis_client import close_redis, get_redis
 from app.db.session import SessionLocal
-from app.models.work import CurrentFile, PixivVersion, PixivWork, Series, SyncRestrict, SyncSource, SyncSourceType, Tag, WorkTagRelation, WorkType
+from app.models.work import CurrentFile, PixivVersion, PixivWork, Series, SyncRestrict, SyncSource, SyncSourceType, Tag, WorkSource, WorkStatus, WorkTagRelation, WorkType
 from app.schemas.pixiv import RemoteSnapshot
 from app.services.cache_service import CacheService
 
@@ -221,13 +221,25 @@ async def test_redis_stream_archive_job_lifecycle():
     redis_client = get_redis()
     queue = ArchiveJobQueue(redis_client)
     try:
-        first = await queue.enqueue(WorkType.UGOIRA, 778899, force_refresh=True)
+        first = await queue.enqueue(
+            WorkType.UGOIRA,
+            778899,
+            force_refresh=True,
+            source_id=11,
+        )
         assert first["status"] == "queued"
         assert first["kind"] == "illust"
+        assert first["source_ids"] == [11]
 
-        duplicate = await queue.enqueue(WorkType.ILLUST, 778899, force_refresh=True)
+        duplicate = await queue.enqueue(
+            WorkType.ILLUST,
+            778899,
+            force_refresh=True,
+            source_id=12,
+        )
         assert duplicate["job_id"] == first["job_id"]
         assert duplicate["deduplicated"] is True
+        assert duplicate["source_ids"] == [11, 12]
 
         item = await queue.read_one("test-consumer", block_ms=100)
         assert item is not None
@@ -237,6 +249,7 @@ async def test_redis_stream_archive_job_lifecycle():
         running = await queue.mark_running(job_id, "test-consumer")
         assert running["status"] == "running"
         assert running["attempts"] == 1
+        assert running["source_ids"] == [11, 12]
 
         await queue.touch(stream_id, "test-consumer")
         await queue.mark_succeeded(job_id, {"version": 1})
@@ -245,10 +258,12 @@ async def test_redis_stream_archive_job_lifecycle():
         final = await queue.get(job_id)
         assert final["status"] == "succeeded"
         assert final["result"] == {"version": 1}
+        assert final["source_ids"] == [11, 12]
 
         retried = await queue.retry(job_id)
         assert retried["job_id"] != job_id
         assert retried["status"] == "queued"
+        assert retried["source_ids"] == [11, 12]
 
         retry_item = await queue.read_one("test-consumer", block_ms=100)
         assert retry_item is not None
@@ -420,3 +435,226 @@ async def test_redis_stream_sync_job_lifecycle():
             await redis_client.delete(key)
         for key, value in old.items():
             setattr(settings, key, value)
+
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_archive_job_finalizing_creates_followup_for_late_source():
+    from app.services.archive_jobs import ArchiveJobQueue
+
+    settings = get_settings()
+    suffix = uuid.uuid4().hex
+    old = {
+        "archive_job_stream": settings.archive_job_stream,
+        "archive_job_group": settings.archive_job_group,
+        "archive_job_status_prefix": settings.archive_job_status_prefix,
+        "archive_job_dedupe_prefix": settings.archive_job_dedupe_prefix,
+        "archive_job_claim_idle_ms": settings.archive_job_claim_idle_ms,
+    }
+    settings.archive_job_stream = f"test:archive:finalize:{suffix}"
+    settings.archive_job_group = f"test-finalize-workers-{suffix}"
+    settings.archive_job_status_prefix = f"test:archive:finalize:job:{suffix}:"
+    settings.archive_job_dedupe_prefix = f"test:archive:finalize:dedupe:{suffix}:"
+    settings.archive_job_claim_idle_ms = 1000
+
+    redis_client = get_redis()
+    queue = ArchiveJobQueue(redis_client)
+    try:
+        first = await queue.enqueue(
+            WorkType.ILLUST, 445566, source_id=101
+        )
+        item = await queue.read_one("finalize-consumer", block_ms=100)
+        assert item is not None
+        stream_id, job_id = item
+        await queue.mark_running(job_id, "finalize-consumer")
+        finalizing = await queue.mark_finalizing(job_id)
+        assert finalizing["status"] == "finalizing"
+
+        late = await queue.enqueue(
+            WorkType.ILLUST, 445566, source_id=202
+        )
+        assert late["job_id"] != first["job_id"]
+        assert late["source_ids"] == [202]
+
+        await queue.mark_succeeded(job_id, {"version": 1})
+        await queue.ack(stream_id)
+
+        late_item = await queue.read_one("finalize-consumer", block_ms=100)
+        assert late_item is not None
+        assert late_item[1] == late["job_id"]
+        await queue.mark_failed(late_item[1], RuntimeError("intentional"))
+        await queue.ack(late_item[0])
+    finally:
+        await redis_client.delete(settings.archive_job_stream)
+        for key in await redis_client.keys(f"test:archive:finalize:*{suffix}*"):
+            await redis_client.delete(key)
+        for key, value in old.items():
+            setattr(settings, key, value)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_library_api_service_filters_sources_history_and_stats(tmp_path: Path):
+    from datetime import datetime
+
+    from app.services.library_service import LibraryService
+    from app.services.work_sources import record_work_sources
+
+    settings = get_settings()
+    old_root = settings.storage_root
+    old_ttl = settings.remote_check_ttl_seconds
+    settings.storage_root = tmp_path
+    settings.remote_check_ttl_seconds = 0
+
+    work_id = 987651299
+    remote_user_id = f"lib-{uuid.uuid4().hex[:12]}"
+    tag_name = f"library-tag-{uuid.uuid4().hex[:10]}"
+
+    class LibraryPixiv(FakePixiv):
+        async def get_novel_snapshot(self, pixiv_id):
+            self.calls += 1
+            return RemoteSnapshot(
+                pixiv_id=pixiv_id,
+                work_type=WorkType.NOVEL,
+                title="library-query-title",
+                caption="library query caption",
+                author_id=424242,
+                author_name="Library Author",
+                tags=[{"name": tag_name, "translated_name": "library translated"}],
+                created_at=datetime(2026, 1, 2, 3, 4, 5),
+                updated_at=datetime(2026, 1, 3, 3, 4, 5),
+                text_content="library novel body searchable",
+                version_token="9" * 64,
+                metadata={"probe": "library"},
+            )
+
+    try:
+        async with SessionLocal() as session:
+            await session.execute(
+                delete(PixivWork).where(PixivWork.id == str(work_id))
+            )
+            await session.execute(
+                delete(SyncSource).where(
+                    SyncSource.remote_user_id == remote_user_id
+                )
+            )
+            await session.commit()
+
+            source = SyncSource(
+                source_type=SyncSourceType.BOOKMARKS,
+                remote_user_id=remote_user_id,
+                restrict_mode=SyncRestrict.PUBLIC,
+                include_illust=True,
+                include_novel=True,
+                enabled=True,
+                interval_seconds=3600,
+            )
+            session.add(source)
+            await session.commit()
+            await session.refresh(source)
+
+            cached = await CacheService(
+                session,
+                LibraryPixiv(),
+                redis_client=get_redis(),
+            ).get_novel(work_id)
+            assert cached.version == 1
+
+            await record_work_sources(
+                session,
+                str(work_id),
+                [source.id],
+            )
+            relation = await session.get(
+                WorkSource,
+                {"work_id": str(work_id), "source_id": source.id},
+            )
+            assert relation is not None
+
+            library = LibraryService(session)
+            listing = await library.list_works(
+                page=1,
+                page_size=10,
+                q="library-query",
+                work_types=[WorkType.NOVEL],
+                statuses=[WorkStatus.ACTIVE],
+                author_id="424242",
+                tags=[tag_name],
+                tag_mode="all",
+                source_id=source.id,
+                is_ai=False,
+                x_restrict=0,
+                search_novel_text=False,
+                sort="cached_at",
+                order="desc",
+            )
+            assert listing.pagination.total == 1
+            item = listing.items[0]
+            assert item.pixiv_id == work_id
+            assert item.tags[0].name == tag_name
+            assert item.source_ids == [source.id]
+            assert item.current_file_count == 1
+            assert item.current_size_bytes > 0
+
+            detail = await library.get_work(
+                work_id,
+                include_content=True,
+                include_raw_meta=True,
+                include_paths=False,
+            )
+            assert detail is not None
+            assert detail.novel_content == "library novel body searchable"
+            assert detail.raw_meta["probe"] == "library"
+            assert detail.sources[0].source_id == source.id
+            assert detail.current_files[0].download_url.endswith("/novel.txt")
+            assert detail.current_files[0].local_path is None
+
+            history = await library.get_history(
+                work_id,
+                include_content=True,
+            )
+            assert history is not None
+            assert history.current_version == 1
+            assert history.versions[0].novel_content == "library novel body searchable"
+
+            integrity = await library.verify_work(work_id, verify_hash=True)
+            assert integrity is not None
+            assert integrity["ok"] is True
+            assert integrity["files"][0]["hash_ok"] is True
+
+            author = await library.get_author("424242")
+            assert author is not None
+            assert author.works >= 1
+            authors = await library.list_authors(
+                page=1,
+                page_size=10,
+                q="Library Author",
+            )
+            assert any(row.author_id == 424242 for row in authors.items)
+
+            tags = await library.list_tags(
+                page=1,
+                page_size=10,
+                q=tag_name,
+            )
+            assert tags.pagination.total == 1
+            assert tags.items[0].name == tag_name
+
+            stats = await library.stats()
+            assert stats.works_total >= 1
+            assert stats.works_by_type["novel"] >= 1
+            assert stats.works_by_type["ugoira"] >= 0
+            assert stats.current_storage_bytes >= item.current_size_bytes
+            assert stats.archive_storage_bytes >= stats.current_storage_bytes
+            assert stats.source_links >= 1
+
+            await session.execute(
+                delete(PixivWork).where(PixivWork.id == str(work_id))
+            )
+            await session.execute(
+                delete(SyncSource).where(SyncSource.id == source.id)
+            )
+            await session.execute(delete(Tag).where(Tag.name == tag_name))
+            await session.commit()
+    finally:
+        settings.storage_root = old_root
+        settings.remote_check_ttl_seconds = old_ttl

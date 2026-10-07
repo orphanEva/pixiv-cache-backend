@@ -12,7 +12,7 @@ CREATE TABLE schema_version (
   CONSTRAINT chk_schema_version_singleton CHECK (id = 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT INTO schema_version (id, version) VALUES (1, 3);
+INSERT INTO schema_version (id, version) VALUES (1, 4);
 
 CREATE TABLE series (
   id VARCHAR(32) NOT NULL PRIMARY KEY,
@@ -140,4 +140,16 @@ CREATE TABLE sync_sources (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uk_sync_source_identity (type, remote_user_id, restrict_mode),
   KEY idx_sync_due (enabled, next_run_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+CREATE TABLE work_sources (
+  work_id VARCHAR(32) NOT NULL,
+  source_id BIGINT UNSIGNED NOT NULL,
+  first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (work_id, source_id),
+  KEY idx_work_sources_source (source_id, last_seen_at),
+  CONSTRAINT fk_ws_work_id FOREIGN KEY (work_id) REFERENCES works(id) ON DELETE CASCADE,
+  CONSTRAINT fk_ws_source_id FOREIGN KEY (source_id) REFERENCES sync_sources(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

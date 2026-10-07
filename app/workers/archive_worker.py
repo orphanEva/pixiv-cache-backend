@@ -16,6 +16,7 @@ from app.db.session import SessionLocal, engine
 from app.models.work import WorkType
 from app.services.archive_jobs import ArchiveJobQueue
 from app.services.cache_service import CacheService
+from app.services.work_sources import record_work_sources
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,12 @@ class ArchiveWorker:
                     WorkType(job["kind"]),
                     refresh=True,
                     bypass_ttl=bool(job["force_refresh"]),
+                )
+                latest_job = await self.queue.mark_finalizing(job_id)
+                await record_work_sources(
+                    session,
+                    str(result.pixiv_id),
+                    (latest_job or job).get("source_ids") or [],
                 )
             await self.queue.mark_succeeded(
                 job_id,
