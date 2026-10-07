@@ -69,17 +69,44 @@ class ArchiveJobQueue:
             values.update(int(value) for value in source_ids)
         return sorted(value for value in values if value > 0)
 
-    async def _attach_sources(self, job_id: str, source_ids: Iterable[int]) -> None:
+    async def _attach_sources_if_active(
+        self,
+        job_id: str,
+        source_ids: Iterable[int],
+    ) -> bool:
         values = list(source_ids)
         if not values:
-            return
-        async with self.redis.pipeline(transaction=True) as pipe:
-            pipe.sadd(self.source_key(job_id), *[str(value) for value in values])
-            pipe.expire(
-                self.source_key(job_id),
-                self.settings.archive_job_status_ttl_seconds,
-            )
-            await pipe.execute()
+            status = await self.redis.hget(self.status_key(job_id), "status")
+            return status in {"queued", "running"}
+        script = """
+local status = redis.call('HGET', KEYS[1], 'status')
+if status ~= 'queued' and status ~= 'running' then
+  return 0
+end
+for i = 1, #ARGV - 1 do
+  redis.call('SADD', KEYS[2], ARGV[i])
+end
+redis.call('EXPIRE', KEYS[2], ARGV[#ARGV])
+return 1
+"""
+        result = await self.redis.eval(
+            script,
+            2,
+            self.status_key(job_id),
+            self.source_key(job_id),
+            *[str(value) for value in values],
+            str(self.settings.archive_job_status_ttl_seconds),
+        )
+        return bool(result)
+
+    async def _delete_dedupe_if_owned(self, dedupe: str, job_id: str) -> None:
+        script = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+        await self.redis.eval(script, 1, dedupe, job_id)
 
     async def enqueue(
         self,
@@ -96,13 +123,13 @@ class ArchiveJobQueue:
 
         existing_id = await self.redis.get(dedupe)
         if existing_id:
-            existing = await self.get(existing_id)
-            if existing and existing["status"] in {"queued", "running"}:
-                await self._attach_sources(existing_id, sources)
+            active = await self._attach_sources_if_active(existing_id, sources)
+            if active:
                 existing = await self.get(existing_id)
-                existing["deduplicated"] = True
-                return existing
-            await self.redis.delete(dedupe)
+                if existing:
+                    existing["deduplicated"] = True
+                    return existing
+            await self._delete_dedupe_if_owned(dedupe, existing_id)
 
         job_id = uuid.uuid4().hex
         claimed = await self.redis.set(
@@ -115,14 +142,29 @@ class ArchiveJobQueue:
             for _ in range(5):
                 existing_id = await self.redis.get(dedupe)
                 if existing_id:
-                    existing = await self.get(existing_id)
-                    if existing:
-                        await self._attach_sources(existing_id, sources)
+                    active = await self._attach_sources_if_active(
+                        existing_id,
+                        sources,
+                    )
+                    if active:
                         existing = await self.get(existing_id)
-                        existing["deduplicated"] = True
-                        return existing
+                        if existing:
+                            existing["deduplicated"] = True
+                            return existing
+                    await self._delete_dedupe_if_owned(dedupe, existing_id)
+                    claimed = await self.redis.set(
+                        dedupe,
+                        job_id,
+                        ex=self.settings.archive_job_dedupe_ttl_seconds,
+                        nx=True,
+                    )
+                    if claimed:
+                        break
                 await asyncio.sleep(0.01)
-            raise RuntimeError("Archive job deduplication race could not be resolved")
+            if not claimed:
+                raise RuntimeError(
+                    "Archive job deduplication race could not be resolved"
+                )
 
         now = utc_iso()
         mapping = {
