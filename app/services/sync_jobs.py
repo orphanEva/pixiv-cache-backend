@@ -105,6 +105,18 @@ class SyncJobQueue:
         raw = await self.redis.hgetall(self.status_key(job_id))
         return self._decode(raw) if raw else None
 
+    async def retry(self, job_id: str) -> dict[str, Any] | None:
+        previous = await self.get(job_id)
+        if not previous:
+            return None
+        if previous["status"] in {"queued", "running"}:
+            previous["deduplicated"] = True
+            return previous
+        return await self.enqueue(
+            previous["source_id"],
+            full=bool(previous.get("full")),
+        )
+
     async def mark_running(self, job_id: str, consumer: str) -> dict[str, Any] | None:
         key = self.status_key(job_id)
         if not await self.redis.exists(key):

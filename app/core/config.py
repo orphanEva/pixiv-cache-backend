@@ -56,6 +56,24 @@ class Settings(BaseSettings):
     archive_worker_heartbeat_key: str = "pixiv:archive:worker:healthy"
     archive_worker_heartbeat_ttl_seconds: int = 30
 
+    sync_job_stream: str = "pixiv:sync:jobs"
+    sync_job_group: str = "pixiv-sync-workers"
+    sync_job_status_prefix: str = "pixiv:sync:job:"
+    sync_job_dedupe_prefix: str = "pixiv:sync:dedupe:"
+    sync_job_status_ttl_seconds: int = 7 * 24 * 3600
+    sync_job_dedupe_ttl_seconds: int = 6 * 3600
+    sync_job_claim_idle_ms: int = 15 * 60 * 1000
+    sync_worker_block_ms: int = 5000
+    sync_worker_heartbeat_key: str = "pixiv:sync:worker:healthy"
+    sync_worker_heartbeat_ttl_seconds: int = 30
+    sync_scheduler_poll_seconds: int = 30
+    sync_due_batch_size: int = 20
+    sync_schedule_reservation_seconds: int = 15 * 60
+    sync_failure_retry_seconds: int = 15 * 60
+    sync_max_pages_per_run: int = 1000
+    sync_frontier_size: int = 50
+    sync_page_delay_seconds: float = 0.2
+
     maintenance_freeze_key: str = "pixiv:maintenance:freeze"
     maintenance_freeze_ttl_seconds: int = 2 * 3600
     maintenance_freeze_wait_seconds: int = 5
