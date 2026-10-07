@@ -114,7 +114,6 @@ class ArchiveJobQueue:
         finalizing 之后不再允许并入旧任务，避免来源在最终落库边界丢失。
         """
         values = list(source_ids)
-        allowed = ",".join(f"'{item}'" for item in sorted(SOURCE_MERGE_STATUSES))
         script = f"""
 local status = redis.call('HGET', KEYS[1], 'status')
 if not status or not ({' or '.join([f"status == '{item}'" for item in sorted(SOURCE_MERGE_STATUSES)])}) then

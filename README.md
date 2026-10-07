@@ -73,7 +73,12 @@ All non-health routes require an `X-API-Key` header.
 - `POST /api/admin/cache/{kind}/{id}/refresh` (queues a worker job)
 - `POST /api/jobs/archive/{kind}/{id}`
 - `GET /api/jobs/{job_id}`
+- `GET /api/jobs?status=dead`
 - `POST /api/jobs/{job_id}/retry`
+- `POST /api/jobs/{job_id}/replay`
+- `GET /api/ops/status`
+- `GET /api/ops/jobs?status=dead`
+- `POST /api/ops/jobs/{job_id}/replay`
 - `POST /api/sync/sources/author/{user_id}`
 - `POST /api/sync/sources/bookmarks/{user_id}`
 - `GET /api/sync/sources`
@@ -521,3 +526,85 @@ sql/upgrades/v3_to_v4.sql
 ```
 
 Runtime containers still perform no automatic DDL.
+
+
+## v1.6 archive reliability and operations
+
+Archive jobs now use automatic exponential backoff for transient failures.
+
+Default retry policy:
+
+```env
+ARCHIVE_JOB_MAX_ATTEMPTS=5
+ARCHIVE_JOB_RETRY_BASE_SECONDS=30
+ARCHIVE_JOB_RETRY_MAX_SECONDS=1800
+ARCHIVE_JOB_DEAD_MAXLEN=10000
+```
+
+State flow:
+
+```text
+queued
+  -> running
+      -> succeeded
+      -> retry_wait -> queued -> running ...
+      -> dead
+```
+
+Only transient failures are retried automatically. Pixiv temporary
+unavailability, network timeouts, retryable HTTP responses (408/425/429/5xx),
+maintenance races and transient database connection errors are retryable.
+Explicit not-found/private/auth failures, invalid archive data and insufficient
+local disk space go directly to `dead`.
+
+After the configured attempts are exhausted, the job is stored as `dead` and
+an event is appended to the bounded Redis DLQ stream. The original task status,
+error, attempts and sync-source IDs remain queryable for the normal job-status
+TTL.
+
+Query dead jobs:
+
+```sh
+curl -G -H "X-API-Key: $API_KEY" \
+  --data-urlencode "status=dead" \
+  http://127.0.0.1:18081/api/jobs
+```
+
+Replay a dead job:
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" \
+  http://127.0.0.1:18081/api/jobs/JOB_ID/replay
+```
+
+Replay creates a new archive job and preserves the original sync-source
+attribution. The original dead job remains as history until its status TTL
+expires.
+
+Operational status:
+
+```sh
+curl -H "X-API-Key: $API_KEY" \
+  http://127.0.0.1:18081/api/ops/status
+```
+
+The response summarizes MySQL/Redis/schema readiness, archive/sync/maintenance
+worker heartbeats, archive queue/pending/retry/DLQ counts, sync queue state and
+filesystem capacity.
+
+The equivalent task management endpoints under `/api/ops/jobs` are convenient
+for monitoring clients:
+
+```text
+GET  /api/ops/jobs?status=retry_wait
+GET  /api/ops/jobs?status=dead
+POST /api/ops/jobs/{job_id}/replay
+```
+
+### DDL comments
+
+The canonical `sql/pixiv_archive.sql` now includes Chinese MySQL `COMMENT`
+metadata for every table and every column. This is documentation-only and does
+not change the functional schema version: v1.6 still requires **schema v4**.
+Existing schema-v4 databases do not need a migration merely for runtime
+compatibility; brand-new databases should use the latest canonical DDL.
