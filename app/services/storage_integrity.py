@@ -130,6 +130,21 @@ class StorageIntegrityService:
         quarantined: list[str] = []
         skipped_recent: list[str] = []
 
+        # Decide orphan eligibility BEFORE deleting .part files, because unlink()
+        # updates the parent directory mtime and would make an old orphan look active.
+        orphan_candidates: list[Path] = []
+        for path in data["orphan_version_dirs"]:
+            if not path.exists() or not self._under_root(path):
+                continue
+            if self._tree_has_recent_activity(
+                path,
+                self.settings.storage_orphan_grace_seconds,
+                now,
+            ):
+                skipped_recent.append(str(path))
+            else:
+                orphan_candidates.append(path)
+
         for path in data["part_files"]:
             if not path.exists() or not self._under_root(path):
                 continue
@@ -145,15 +160,8 @@ class StorageIntegrityService:
 
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         quarantine_root = self.root / ".quarantine" / stamp
-        for path in data["orphan_version_dirs"]:
-            if not path.exists() or not self._under_root(path):
-                continue
-            if self._tree_has_recent_activity(
-                path,
-                self.settings.storage_orphan_grace_seconds,
-                now,
-            ):
-                skipped_recent.append(str(path))
+        for path in orphan_candidates:
+            if not path.exists():
                 continue
             relative = path.relative_to(self.root)
             destination = quarantine_root / relative
