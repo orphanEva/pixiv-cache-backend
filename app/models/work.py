@@ -211,3 +211,27 @@ class SyncSource(Base):
         ),
         Index("idx_sync_due", "enabled", "next_run_at"),
     )
+
+
+
+class WorkSource(Base):
+    __tablename__ = "work_sources"
+    work_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("works.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    source_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(MYSQL_BIGINT(unsigned=True), "mysql"),
+        ForeignKey("sync_sources.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    __table_args__ = (
+        Index("idx_work_sources_source", "source_id", "last_seen_at"),
+    )
