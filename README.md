@@ -18,9 +18,10 @@ your old dump. Back up the original schema and media first. The old
 three-table `pixiv_cache` layout and the originally supplied seven-table
 dump are *different schemas* and need an explicit, reviewed data migration.
 
-Seven archive tables plus one metadata table:
+Seven archive tables plus schema/synchronization metadata:
 
 - `schema_version`: manually applied database schema version (metadata only)
+- `sync_sources`: persistent author/bookmark synchronization subscriptions
 - `works`: current work metadata, fingerprint, accessibility, current version
 - `series`: series metadata
 - `tags` and `work_tag_relation`: searchable current tags
@@ -72,6 +73,11 @@ All non-health routes require an `X-API-Key` header.
 - `POST /api/jobs/archive/{kind}/{id}`
 - `GET /api/jobs/{job_id}`
 - `POST /api/jobs/{job_id}/retry`
+- `POST /api/sync/sources/author/{user_id}`
+- `POST /api/sync/sources/bookmarks/{user_id}`
+- `GET /api/sync/sources`
+- `POST /api/sync/sources/{id}/run`
+- `GET /api/sync/jobs/{job_id}`
 
 `refresh=true` checks upstream according to
 `REMOTE_CHECK_TTL_SECONDS` (0 checks each request). `refresh=false`
@@ -348,4 +354,82 @@ Before applying the requested restore, the CLI automatically takes a
 pre-restore database dump. If the target DB restore fails, it attempts to put
 that DB dump back and rolls storage directories back to their previous state.
 
-The MySQL schema remains **v2**; v1.3 adds operational tooling only.
+v1.3 itself used schema v2. v1.4 adds persistent sync sources and requires schema v3.
+
+
+## v1.4 author and bookmark synchronization
+
+A separate `sync` container discovers remote works and submits ordinary
+archive jobs. It never downloads media itself:
+
+```text
+Pixiv author/bookmarks
+        ↓
+    sync worker
+        ↓
+ Redis archive jobs
+        ↓
+  archive worker
+        ↓
+ MySQL + local media
+```
+
+### Archive an author's works
+
+Create/update an author source and run it immediately:
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "http://127.0.0.1:18081/api/sync/sources/author/123456?include_illust=true&include_novel=true&interval_seconds=21600&run_now=true"
+```
+
+The first run walks all Pixiv pages (up to `SYNC_MAX_PAGES_PER_RUN`). Later
+runs remember the newest IDs from the previous run and stop as soon as that old
+frontier is reached.
+
+### Synchronize bookmarks
+
+For the authenticated Pixiv account:
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "http://127.0.0.1:18081/api/sync/sources/bookmarks/self?restrict=public&run_now=true"
+```
+
+Private bookmarks:
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "http://127.0.0.1:18081/api/sync/sources/bookmarks/self?restrict=private&run_now=true"
+```
+
+`self` is resolved from the authenticated Pixiv App API session. A numeric
+Pixiv user id can be used for public sources.
+
+List sources:
+
+```sh
+curl -H "X-API-Key: $API_KEY" http://127.0.0.1:18081/api/sync/sources
+```
+
+Force a complete rescan:
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "http://127.0.0.1:18081/api/sync/sources/SOURCE_ID/run?full=true"
+```
+
+Incremental discovery is durable: source schedule/frontier state lives in
+MySQL, sync jobs live in a Redis Stream, and actual media archive jobs use the
+existing archive Redis Stream.
+
+### Schema v3
+
+New empty databases use the current `sql/pixiv_archive.sql` directly. Existing
+schema-v2 installations must manually apply:
+
+```text
+sql/upgrades/v2_to_v3.sql
+```
+
+Runtime containers still execute no DDL automatically.
