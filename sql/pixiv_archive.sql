@@ -12,7 +12,7 @@ CREATE TABLE schema_version (
   CONSTRAINT chk_schema_version_singleton CHECK (id = 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT INTO schema_version (id, version) VALUES (1, 2);
+INSERT INTO schema_version (id, version) VALUES (1, 3);
 
 CREATE TABLE series (
   id VARCHAR(32) NOT NULL PRIMARY KEY,
@@ -119,4 +119,25 @@ CREATE TABLE work_tag_relation (
   KEY idx_tag_id (tag_id),
   CONSTRAINT fk_wtr_tag_id FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE,
   CONSTRAINT fk_wtr_work_id FOREIGN KEY (work_id) REFERENCES works(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+CREATE TABLE sync_sources (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  type ENUM('author','bookmarks') NOT NULL,
+  remote_user_id VARCHAR(32) NOT NULL,
+  restrict_mode ENUM('public','private') NOT NULL DEFAULT 'public',
+  include_illust TINYINT(1) NOT NULL DEFAULT 1,
+  include_novel TINYINT(1) NOT NULL DEFAULT 1,
+  enabled TINYINT(1) NOT NULL DEFAULT 1,
+  interval_seconds INT UNSIGNED NOT NULL DEFAULT 21600,
+  frontier_json JSON,
+  next_run_at DATETIME,
+  last_run_at DATETIME,
+  last_success_at DATETIME,
+  last_error VARCHAR(1000),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_sync_source_identity (type, remote_user_id, restrict_mode),
+  KEY idx_sync_due (enabled, next_run_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

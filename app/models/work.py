@@ -33,6 +33,16 @@ class WorkStatus(str, enum.Enum):
     ERROR = "error"
 
 
+class SyncSourceType(str, enum.Enum):
+    AUTHOR = "author"
+    BOOKMARKS = "bookmarks"
+
+
+class SyncRestrict(str, enum.Enum):
+    PUBLIC = "public"
+    PRIVATE = "private"
+
+
 def db_enum(enum_class):
     return Enum(enum_class, values_callable=lambda cls: [v.value for v in cls], native_enum=True)
 
@@ -158,3 +168,42 @@ class WorkTagRelation(Base):
     work_id: Mapped[str] = mapped_column(String(32), ForeignKey("works.id", ondelete="CASCADE"), primary_key=True)
     tag_id: Mapped[int] = mapped_column(Integer().with_variant(MYSQL_INTEGER(unsigned=True), "mysql"), ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+
+
+
+class SyncSource(Base):
+    __tablename__ = "sync_sources"
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(MYSQL_BIGINT(unsigned=True), "mysql"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    source_type: Mapped[SyncSourceType] = mapped_column(
+        "type", db_enum(SyncSourceType), nullable=False
+    )
+    remote_user_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    restrict_mode: Mapped[SyncRestrict] = mapped_column(
+        db_enum(SyncRestrict), nullable=False, default=SyncRestrict.PUBLIC
+    )
+    include_illust: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    include_novel: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=21600)
+    frontier_json: Mapped[dict | None] = mapped_column(JSON)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP")
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "type", "remote_user_id", "restrict_mode",
+            name="uk_sync_source_identity",
+        ),
+        Index("idx_sync_due", "enabled", "next_run_at"),
+    )
