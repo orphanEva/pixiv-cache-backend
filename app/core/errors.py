@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+from sqlalchemy.exc import DisconnectionError, OperationalError
 
 
 class PixivRemoteError(Exception):
@@ -64,14 +65,19 @@ def is_retryable_archive_error(exc: Exception) -> bool:
         ),
     ):
         return False
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status in {408, 425, 429} or status >= 500
     if isinstance(
         exc,
         (
             PixivUnavailableError,
             ArchiveMaintenanceError,
-            httpx.HTTPError,
+            httpx.RequestError,
             TimeoutError,
             ConnectionError,
+            OperationalError,
+            DisconnectionError,
         ),
     ):
         return True
