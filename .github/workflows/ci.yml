@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/v1.5-library-api]
   pull_request:
 
 jobs:
