@@ -2,6 +2,7 @@
 services:
   api:
     build: .
+    image: pixiv-cache-backend:local
     env_file: .env
     restart: unless-stopped
     ports:
@@ -17,6 +18,25 @@ services:
       timeout: 3s
       retries: 5
       start_period: 15s
+
+  worker:
+    build: .
+    image: pixiv-cache-backend:local
+    env_file: .env
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.archive_worker"]
+    volumes:
+      - ./data:/data/pixiv
+    depends_on:
+      redis:
+        condition: service_healthy
+    stop_grace_period: 30m
+    healthcheck:
+      test: ["CMD", "python", "scripts/check_worker_health.py"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
 
   redis:
     image: redis:7.4-alpine
