@@ -74,12 +74,13 @@ jobs:
         run: |
           cp .env.example .env
           docker compose config --quiet
-      - name: Verify archive and maintenance worker heartbeats
+      - name: Verify archive sync and maintenance worker heartbeats
         run: |
           set -e
           docker network create pixiv-ci
-          trap 'docker rm -f pixiv-ci-worker pixiv-ci-maintenance pixiv-ci-redis >/dev/null 2>&1 || true; docker network rm pixiv-ci >/dev/null 2>&1 || true' EXIT
+          trap 'docker rm -f pixiv-ci-worker pixiv-ci-sync pixiv-ci-maintenance pixiv-ci-redis >/dev/null 2>&1 || true; docker network rm pixiv-ci >/dev/null 2>&1 || true' EXIT
           docker run -d --name pixiv-ci-redis --network pixiv-ci redis:7.4-alpine
+
           docker run -d --name pixiv-ci-worker --network pixiv-ci \
             -e REDIS_URL=redis://pixiv-ci-redis:6379/0 \
             -e SCHEMA_CHECK_ON_STARTUP=false \
@@ -94,6 +95,25 @@ jobs:
           done
           if [ "$archive_ok" != "1" ]; then
             docker logs pixiv-ci-worker
+            exit 1
+          fi
+
+          docker run -d --name pixiv-ci-sync --network pixiv-ci \
+            -e REDIS_URL=redis://pixiv-ci-redis:6379/0 \
+            -e SCHEMA_CHECK_ON_STARTUP=false \
+            -e SYNC_SCHEDULER_POLL_SECONDS=0 \
+            -e WORKER_HEARTBEAT_KEY=pixiv:sync:worker:healthy \
+            pixiv-cache-backend:ci python -m app.workers.sync_worker
+          sync_ok=0
+          for i in $(seq 1 30); do
+            if docker exec pixiv-ci-sync python scripts/check_worker_health.py; then
+              sync_ok=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$sync_ok" != "1" ]; then
+            docker logs pixiv-ci-sync
             exit 1
           fi
 

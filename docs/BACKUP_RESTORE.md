@@ -31,7 +31,7 @@ version.
 ## Consistency freeze
 
 Backup creation takes the Redis maintenance freeze. New writes are rejected or
-left queued, the archive worker stops claiming new jobs, and backup waits until
+left queued, the archive and sync workers stop claiming new jobs, and backup waits until
 all existing per-work cache locks disappear. Local read-only cache access is
 still possible.
 
@@ -53,7 +53,7 @@ docker compose exec api python -m app.maintenance.backup verify \
 Restore:
 
 ```sh
-docker compose stop api worker maintenance
+docker compose stop api worker sync maintenance
 docker compose run --rm api python -m app.maintenance.backup restore \
   /data/pixiv/.backups/daily --confirm-destructive-restore
 docker compose up -d

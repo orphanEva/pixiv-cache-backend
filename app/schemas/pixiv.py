@@ -77,3 +77,14 @@ class HistoryResponse(BaseModel):
     type: WorkType
     current_version: int
     versions: list[VersionSummary]
+
+
+
+class DiscoveredWork(BaseModel):
+    pixiv_id: int
+    work_type: WorkType
+
+
+class DiscoveryPage(BaseModel):
+    items: list[DiscoveredWork] = Field(default_factory=list)
+    next_params: dict | None = None

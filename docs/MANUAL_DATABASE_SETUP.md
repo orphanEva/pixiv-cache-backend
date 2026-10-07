@@ -54,3 +54,17 @@ sql/upgrades/v1_to_v2.sql
 After that, the runtime DML-only user only needs to read
 `schema_version`. Application startup checks that the database version equals
 the version required by the running code and refuses to start on mismatch.
+
+
+### v2 -> v3
+
+v1.4 adds the persistent `sync_sources` table. Existing schema-v2 databases
+must apply:
+
+```text
+sql/upgrades/v2_to_v3.sql
+```
+
+After the script succeeds, `schema_version.id=1` must contain `version=3`.
+For a database that predates schema versioning, apply `v1_to_v2.sql` first,
+then `v2_to_v3.sql`. Runtime containers never execute either script.

@@ -8,7 +8,7 @@ from app.clients.base import PixivClient
 from app.core.config import get_settings
 from app.core.redis_client import close_redis, get_redis
 from app.db.session import SessionLocal
-from app.models.work import CurrentFile, PixivVersion, PixivWork, Series, Tag, WorkTagRelation, WorkType
+from app.models.work import CurrentFile, PixivVersion, PixivWork, Series, SyncRestrict, SyncSource, SyncSourceType, Tag, WorkTagRelation, WorkType
 from app.schemas.pixiv import RemoteSnapshot
 from app.services.cache_service import CacheService
 
@@ -312,5 +312,111 @@ async def test_backup_restore_roundtrip_against_mysql8(tmp_path: Path):
             )).scalar_one_or_none()
             assert probe is None
     finally:
+        for key, value in old.items():
+            setattr(settings, key, value)
+
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_mysql_sync_source_schema_and_persistence():
+    remote_user_id = "9988776655"
+    async with SessionLocal() as session:
+        await session.execute(
+            delete(SyncSource).where(
+                SyncSource.source_type == SyncSourceType.AUTHOR,
+                SyncSource.remote_user_id == remote_user_id,
+            )
+        )
+        await session.commit()
+
+        source = SyncSource(
+            source_type=SyncSourceType.AUTHOR,
+            remote_user_id=remote_user_id,
+            restrict_mode=SyncRestrict.PUBLIC,
+            include_illust=True,
+            include_novel=True,
+            enabled=True,
+            interval_seconds=3600,
+            frontier_json={"illust": ["100"], "novel": ["200"]},
+        )
+        session.add(source)
+        await session.commit()
+        await session.refresh(source)
+
+        loaded = await session.get(SyncSource, source.id)
+        assert loaded is not None
+        assert loaded.source_type == SyncSourceType.AUTHOR
+        assert loaded.frontier_json == {
+            "illust": ["100"],
+            "novel": ["200"],
+        }
+
+        await session.delete(loaded)
+        await session.commit()
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_redis_stream_sync_job_lifecycle():
+    from app.services.sync_jobs import SyncJobQueue
+
+    settings = get_settings()
+    suffix = uuid.uuid4().hex
+    old = {
+        "sync_job_stream": settings.sync_job_stream,
+        "sync_job_group": settings.sync_job_group,
+        "sync_job_status_prefix": settings.sync_job_status_prefix,
+        "sync_job_dedupe_prefix": settings.sync_job_dedupe_prefix,
+        "sync_job_claim_idle_ms": settings.sync_job_claim_idle_ms,
+    }
+    settings.sync_job_stream = f"test:sync:jobs:{suffix}"
+    settings.sync_job_group = f"test-sync-workers-{suffix}"
+    settings.sync_job_status_prefix = f"test:sync:job:{suffix}:"
+    settings.sync_job_dedupe_prefix = f"test:sync:dedupe:{suffix}:"
+    settings.sync_job_claim_idle_ms = 1000
+
+    redis_client = get_redis()
+    queue = SyncJobQueue(redis_client)
+    try:
+        first = await queue.enqueue(12345, full=False)
+        assert first["status"] == "queued"
+        assert first["source_id"] == 12345
+
+        duplicate = await queue.enqueue(12345, full=True)
+        assert duplicate["job_id"] == first["job_id"]
+        assert duplicate["deduplicated"] is True
+        assert duplicate["full"] is True
+
+        item = await queue.read_one("sync-test-consumer", block_ms=100)
+        assert item is not None
+        stream_id, job_id = item
+
+        running = await queue.mark_running(job_id, "sync-test-consumer")
+        assert running["status"] == "running"
+        assert running["attempts"] == 1
+        assert running["full"] is True
+
+        await queue.touch(stream_id, "sync-test-consumer")
+        await queue.mark_succeeded(job_id, {"discovered": 4})
+        await queue.ack(stream_id)
+
+        final = await queue.get(job_id)
+        assert final["status"] == "succeeded"
+        assert final["result"] == {"discovered": 4}
+
+        retried = await queue.retry(job_id)
+        assert retried["job_id"] != job_id
+        assert retried["full"] is True
+
+        retry_item = await queue.read_one("sync-test-consumer", block_ms=100)
+        assert retry_item is not None
+        await queue.mark_failed(retry_item[1], RuntimeError("sync failed"))
+        await queue.ack(retry_item[0])
+        failed = await queue.get(retry_item[1])
+        assert failed["status"] == "failed"
+        assert failed["error_type"] == "RuntimeError"
+    finally:
+        await redis_client.delete(settings.sync_job_stream)
+        for key in await redis_client.keys(f"test:sync:*:{suffix}*"):
+            await redis_client.delete(key)
         for key, value in old.items():
             setattr(settings, key, value)
