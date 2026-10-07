@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     serve_stale_on_remote_unavailable: bool = True
     max_asset_bytes: int = 150 * 1024 * 1024
     storage_audit_max_findings: int = 200
+    storage_min_free_bytes: int = 2 * 1024 * 1024 * 1024
+    storage_part_stale_seconds: int = 24 * 3600
+    storage_orphan_grace_seconds: int = 24 * 3600
     download_timeout_seconds: int = 120
     ugoira_generate_mp4: bool = True
     ugoira_keep_extracted_frames: bool = False

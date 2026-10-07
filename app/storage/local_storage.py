@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 
 from app.core.config import get_settings
-from app.core.errors import PixivUnavailableError
+from app.core.errors import ArchiveStorageError, PixivUnavailableError
 from app.models.work import WorkType
 from app.schemas.pixiv import RemoteSnapshot, UgoiraFrame
 
@@ -28,6 +28,8 @@ class LocalStorage:
         return self.root / work_type.value / str(pixiv_id) / "versions" / str(version_no)
 
     async def materialize(self, snapshot: RemoteSnapshot, version_no: int) -> tuple[str, list[dict]]:
+        self.root.mkdir(parents=True, exist_ok=True)
+        self._ensure_disk_space()
         target = self.version_dir(snapshot.work_type, snapshot.pixiv_id, version_no)
         target.mkdir(parents=True, exist_ok=False)
         try:
@@ -208,6 +210,7 @@ class LocalStorage:
                 raise ValueError(
                     f"Ugoira uncompressed data exceeds limit: {total_uncompressed}"
                 )
+            self._ensure_disk_space(total_uncompressed)
 
             paths: list[Path] = []
             for index, frame in enumerate(frames):
@@ -289,17 +292,34 @@ class LocalStorage:
                 declared = response.headers.get("content-length")
                 if declared and int(declared) > max_bytes:
                     raise ValueError(f"Pixiv asset exceeds max size: {declared} bytes")
+                if declared:
+                    self._ensure_disk_space(int(declared))
+                next_space_check = 64 * 1024 * 1024
                 with part.open("wb") as fp:
                     async for chunk in response.aiter_bytes(1024 * 1024):
                         size += len(chunk)
                         if size > max_bytes:
                             raise ValueError(f"Pixiv asset exceeds max size: {size} bytes")
+                        if size >= next_space_check:
+                            self._ensure_disk_space()
+                            next_space_check += 64 * 1024 * 1024
                         sha.update(chunk)
                         fp.write(chunk)
             os.replace(part, path)
             return sha.hexdigest(), size
         finally:
             part.unlink(missing_ok=True)
+
+    def _ensure_disk_space(self, required_extra: int = 0) -> None:
+        probe = self.root
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        free = shutil.disk_usage(probe).free
+        required = self.settings.storage_min_free_bytes + max(0, int(required_extra))
+        if free < required:
+            raise ArchiveStorageError(
+                f"Insufficient archive storage: free={free} required={required}"
+            )
 
     def _http_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
