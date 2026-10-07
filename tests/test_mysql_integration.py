@@ -263,3 +263,54 @@ async def test_redis_stream_archive_job_lifecycle():
             await redis_client.delete(key)
         for key, value in old.items():
             setattr(settings, key, value)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_backup_restore_roundtrip_against_mysql8(tmp_path: Path):
+    from app.maintenance.backup import ArchiveBackupManager
+
+    settings = get_settings()
+    old = {
+        "storage_root": settings.storage_root,
+        "backup_root": settings.backup_root,
+        "storage_min_free_bytes": settings.storage_min_free_bytes,
+        "maintenance_database_url": settings.maintenance_database_url,
+    }
+    settings.storage_root = tmp_path / "storage"
+    settings.backup_root = tmp_path / "backups"
+    settings.storage_min_free_bytes = 0
+    settings.maintenance_database_url = ""
+    settings.storage_root.mkdir(parents=True)
+    settings.backup_root.mkdir(parents=True)
+
+    probe_name = f"restore-probe-{uuid.uuid4().hex}"
+    file_path = settings.storage_root / "novel/backup-probe/versions/1/novel.txt"
+    file_path.parent.mkdir(parents=True)
+    file_path.write_text("before-backup", encoding="utf-8")
+
+    manager = ArchiveBackupManager()
+    try:
+        created = await manager.create("ci-roundtrip")
+        backup_path = Path(created["backup_path"])
+        assert manager.verify(backup_path)["ok"] is True
+
+        file_path.write_text("mutated-after-backup", encoding="utf-8")
+        async with SessionLocal() as session:
+            session.add(Tag(name=probe_name))
+            await session.commit()
+
+        restored = await manager.restore(
+            backup_path,
+            confirm_destructive_restore=True,
+        )
+        assert restored["restored"] is True
+        assert file_path.read_text(encoding="utf-8") == "before-backup"
+
+        async with SessionLocal() as session:
+            probe = (await session.execute(
+                select(Tag.id).where(Tag.name == probe_name)
+            )).scalar_one_or_none()
+            assert probe is None
+    finally:
+        for key, value in old.items():
+            setattr(settings, key, value)
