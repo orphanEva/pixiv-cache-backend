@@ -11,6 +11,7 @@ from app.api.pixiv_auth import router as pixiv_auth_router
 from app.api.jobs import router as jobs_router
 from app.api.sync import router as sync_router
 from app.api.library import router as library_router
+from app.api.ops import router as ops_router
 from app.api.routes import router
 from app.api.health import router as health_router
 from app.core.config import get_settings
@@ -66,3 +67,4 @@ app.include_router(pixiv_auth_router)
 app.include_router(jobs_router)
 app.include_router(sync_router)
 app.include_router(library_router)
+app.include_router(ops_router)
