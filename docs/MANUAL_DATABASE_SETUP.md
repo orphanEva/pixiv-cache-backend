@@ -84,3 +84,13 @@ sql/upgrades/v3_to_v4.sql
 After the script succeeds, `schema_version.id=1` must contain `version=4`.
 For older installations, apply the upgrade scripts in order. Runtime containers
 never execute these scripts automatically.
+
+
+## v1.6 DDL 中文注释
+
+v1.6 没有新增业务表或字段，因此运行时要求仍然是 `schema_version=4`。
+最新版 `sql/pixiv_archive.sql` 已为每张表和每个字段增加中文 MySQL
+`COMMENT`，方便在 DataGrip、Navicat、IDEA Database 等工具中直接查看含义。
+
+新建空库直接执行最新版 DDL 即可。已有 v4 数据库即使没有这些 COMMENT，
+也不影响程序运行，因此不需要为了注释强制执行结构升级。

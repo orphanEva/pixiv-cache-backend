@@ -211,11 +211,19 @@ async def test_redis_stream_archive_job_lifecycle():
         "archive_job_status_prefix": settings.archive_job_status_prefix,
         "archive_job_dedupe_prefix": settings.archive_job_dedupe_prefix,
         "archive_job_claim_idle_ms": settings.archive_job_claim_idle_ms,
+        "archive_job_retry_zset": settings.archive_job_retry_zset,
+        "archive_job_index_zset": settings.archive_job_index_zset,
+        "archive_job_status_index_prefix": settings.archive_job_status_index_prefix,
+        "archive_job_dead_stream": settings.archive_job_dead_stream,
     }
     settings.archive_job_stream = f"test:archive:jobs:{suffix}"
     settings.archive_job_group = f"test-workers-{suffix}"
     settings.archive_job_status_prefix = f"test:archive:job:{suffix}:"
     settings.archive_job_dedupe_prefix = f"test:archive:dedupe:{suffix}:"
+    settings.archive_job_retry_zset = f"test:archive:retry:{suffix}"
+    settings.archive_job_index_zset = f"test:archive:index:{suffix}"
+    settings.archive_job_status_index_prefix = f"test:archive:status:{suffix}:"
+    settings.archive_job_dead_stream = f"test:archive:dead:{suffix}"
     settings.archive_job_claim_idle_ms = 1000
 
     redis_client = get_redis()
@@ -450,11 +458,19 @@ async def test_archive_job_finalizing_creates_followup_for_late_source():
         "archive_job_status_prefix": settings.archive_job_status_prefix,
         "archive_job_dedupe_prefix": settings.archive_job_dedupe_prefix,
         "archive_job_claim_idle_ms": settings.archive_job_claim_idle_ms,
+        "archive_job_retry_zset": settings.archive_job_retry_zset,
+        "archive_job_index_zset": settings.archive_job_index_zset,
+        "archive_job_status_index_prefix": settings.archive_job_status_index_prefix,
+        "archive_job_dead_stream": settings.archive_job_dead_stream,
     }
     settings.archive_job_stream = f"test:archive:finalize:{suffix}"
     settings.archive_job_group = f"test-finalize-workers-{suffix}"
     settings.archive_job_status_prefix = f"test:archive:finalize:job:{suffix}:"
     settings.archive_job_dedupe_prefix = f"test:archive:finalize:dedupe:{suffix}:"
+    settings.archive_job_retry_zset = f"test:archive:finalize:retry:{suffix}"
+    settings.archive_job_index_zset = f"test:archive:finalize:index:{suffix}"
+    settings.archive_job_status_index_prefix = f"test:archive:finalize:status:{suffix}:"
+    settings.archive_job_dead_stream = f"test:archive:finalize:dead:{suffix}"
     settings.archive_job_claim_idle_ms = 1000
 
     redis_client = get_redis()
@@ -658,3 +674,117 @@ async def test_library_api_service_filters_sources_history_and_stats(tmp_path: P
     finally:
         settings.storage_root = old_root
         settings.remote_check_ttl_seconds = old_ttl
+
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_archive_retry_dead_letter_and_replay_lifecycle():
+    """真实 Redis 验证 retry_wait、到期重投、dead 和 replay 全链路。"""
+    import time
+
+    from app.core.errors import PixivUnavailableError
+    from app.services.archive_jobs import ArchiveJobQueue
+
+    settings = get_settings()
+    suffix = uuid.uuid4().hex
+    old = {
+        "archive_job_stream": settings.archive_job_stream,
+        "archive_job_group": settings.archive_job_group,
+        "archive_job_status_prefix": settings.archive_job_status_prefix,
+        "archive_job_dedupe_prefix": settings.archive_job_dedupe_prefix,
+        "archive_job_retry_zset": settings.archive_job_retry_zset,
+        "archive_job_index_zset": settings.archive_job_index_zset,
+        "archive_job_status_index_prefix": settings.archive_job_status_index_prefix,
+        "archive_job_dead_stream": settings.archive_job_dead_stream,
+        "archive_job_claim_idle_ms": settings.archive_job_claim_idle_ms,
+        "archive_job_retry_base_seconds": settings.archive_job_retry_base_seconds,
+        "archive_job_retry_max_seconds": settings.archive_job_retry_max_seconds,
+    }
+    settings.archive_job_stream = f"test:retry:stream:{suffix}"
+    settings.archive_job_group = f"test-retry-group-{suffix}"
+    settings.archive_job_status_prefix = f"test:retry:job:{suffix}:"
+    settings.archive_job_dedupe_prefix = f"test:retry:dedupe:{suffix}:"
+    settings.archive_job_retry_zset = f"test:retry:zset:{suffix}"
+    settings.archive_job_index_zset = f"test:retry:index:{suffix}"
+    settings.archive_job_status_index_prefix = f"test:retry:status:{suffix}:"
+    settings.archive_job_dead_stream = f"test:retry:dead:{suffix}"
+    settings.archive_job_claim_idle_ms = 1000
+    settings.archive_job_retry_base_seconds = 1
+    settings.archive_job_retry_max_seconds = 4
+
+    redis_client = get_redis()
+    queue = ArchiveJobQueue(redis_client)
+    try:
+        created = await queue.enqueue(
+            WorkType.ILLUST,
+            55667788,
+            source_ids=[7, 9],
+        )
+        assert created["status"] == "queued"
+        assert created["source_ids"] == [7, 9]
+
+        first_item = await queue.read_one("retry-consumer", block_ms=100)
+        assert first_item is not None
+        first_stream_id, job_id = first_item
+        running = await queue.mark_running(job_id, "retry-consumer")
+        assert running["attempts"] == 1
+
+        exc = PixivUnavailableError("temporary upstream timeout")
+        delay = queue.retry_delay_seconds(running["attempts"])
+        assert delay == 1
+        await queue.schedule_retry(
+            first_stream_id,
+            job_id,
+            exc,
+            delay_seconds=delay,
+        )
+
+        waiting = await queue.get(job_id)
+        assert waiting["status"] == "retry_wait"
+        assert waiting["error_type"] == "PixivUnavailableError"
+        assert waiting["source_ids"] == [7, 9]
+
+        # 将 retry score 调整到过去，避免测试真的等待退避时间。
+        await redis_client.zadd(queue.retry_zset, {job_id: time.time() - 1})
+        assert await queue.promote_due_retries() == 1
+
+        queued_again = await queue.get(job_id)
+        assert queued_again["status"] == "queued"
+
+        second_item = await queue.read_one("retry-consumer", block_ms=100)
+        assert second_item is not None
+        second_stream_id, second_job_id = second_item
+        assert second_job_id == job_id
+        running_again = await queue.mark_running(job_id, "retry-consumer")
+        assert running_again["attempts"] == 2
+        assert queue.retry_delay_seconds(2) == 2
+
+        await queue.mark_dead(
+            job_id,
+            exc,
+            reason="retry_exhausted",
+        )
+        await queue.ack(second_stream_id)
+
+        dead = await queue.get(job_id)
+        assert dead["status"] == "dead"
+        assert dead["dead_reason"] == "retry_exhausted"
+
+        dead_page = await queue.list_jobs(status="dead", page=1, page_size=20)
+        assert dead_page["pagination"]["total"] == 1
+        assert dead_page["items"][0]["job_id"] == job_id
+
+        stats = await queue.queue_stats()
+        assert stats["retry_wait"] == 0
+        assert stats["dead_letter_events"] == 1
+        assert stats["status_counts"]["dead"] == 1
+
+        replayed = await queue.replay(job_id)
+        assert replayed["job_id"] != job_id
+        assert replayed["status"] == "queued"
+        assert replayed["source_ids"] == [7, 9]
+    finally:
+        for key in await redis_client.keys(f"*{suffix}*"):
+            await redis_client.delete(key)
+        for key, value in old.items():
+            setattr(settings, key, value)

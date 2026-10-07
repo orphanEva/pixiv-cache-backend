@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     archive_job_status_ttl_seconds: int = 7 * 24 * 3600
     archive_job_dedupe_ttl_seconds: int = 6 * 3600
     archive_job_claim_idle_ms: int = 15 * 60 * 1000
+    archive_job_retry_zset: str = "pixiv:archive:retry"
+    archive_job_index_zset: str = "pixiv:archive:index"
+    archive_job_status_index_prefix: str = "pixiv:archive:status:"
+    archive_job_dead_stream: str = "pixiv:archive:dead"
+    archive_job_dead_maxlen: int = 10000
+    archive_job_max_attempts: int = 5
+    archive_job_retry_base_seconds: int = 30
+    archive_job_retry_max_seconds: int = 30 * 60
     archive_worker_block_ms: int = 5000
     archive_worker_heartbeat_key: str = "pixiv:archive:worker:healthy"
     archive_worker_heartbeat_ttl_seconds: int = 30
