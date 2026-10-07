@@ -26,7 +26,7 @@ class ArchiveWorker:
     """执行真正的 Pixiv 归档任务，并负责失败重试与死信落盘。"""
 
     def __init__(self) -> None:
-        """初始化 Redis 队列、Pixiv 客户端和 worker 身份。"
+        """初始化 Redis 队列、Pixiv 客户端和 worker 身份。"""
         self.settings = get_settings()
         self.redis = get_redis()
         self.queue = ArchiveJobQueue(self.redis)
