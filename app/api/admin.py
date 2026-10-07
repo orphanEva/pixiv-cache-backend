@@ -1,12 +1,11 @@
 """Private operational endpoints. Global API-key middleware also protects them."""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 from app.models.work import PixivWork, PixivVersion, WorkType
-from app.api.routes import get_client
-from app.services.cache_service import CacheService
-from app.core.errors import PixivRemoteError
+from app.core.redis_client import get_redis
+from app.services.archive_jobs import ArchiveJobQueue
 from app.services.storage_integrity import StorageIntegrityService
 
 router = APIRouter(prefix="/api/admin/cache", tags=["admin"])
@@ -34,20 +33,28 @@ async def cache_detail(kind: WorkType, pixiv_id: int, session: AsyncSession = De
             "cached_at": work.cached_at}
 
 
-@router.post("/{kind}/{pixiv_id}/refresh")
-async def force_refresh(kind: WorkType, pixiv_id: int, session: AsyncSession = Depends(get_session)):
-    service = CacheService(session, get_client())
-    try:
-        return await service._get(pixiv_id, kind, refresh=True, bypass_ttl=True)
-    except PixivRemoteError as exc:
-        raise HTTPException(exc.status_code, str(exc)) from exc
+@router.post(
+    "/{kind}/{pixiv_id}/refresh",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def force_refresh(kind: WorkType, pixiv_id: int):
+    """Queue refresh work so large downloads/transcodes never block HTTP."""
+    return await ArchiveJobQueue(get_redis()).enqueue(
+        kind,
+        pixiv_id,
+        force_refresh=True,
+    )
 
 
 
 @router.post("/storage/reconcile")
 async def storage_reconcile(
     verify_hash: bool = False,
+    repair_safe: bool = False,
     session: AsyncSession = Depends(get_session),
 ):
-    """Read-only storage/DB consistency audit. Never deletes or mutates files."""
-    return await StorageIntegrityService(session).audit(verify_hash=verify_hash)
+    """Audit storage; safe repair only cleans stale parts and quarantines orphans."""
+    return await StorageIntegrityService(session).audit(
+        verify_hash=verify_hash,
+        repair_safe=repair_safe,
+    )
