@@ -1,7 +1,7 @@
 # Pixiv Cache Backend
 
 FastAPI + externally managed **MySQL 8** + Redis. Versioned, local Pixiv
-illustration and novel cache built around the seven-table `pixiv_archive` schema.
+illustration and novel cache built around the manually versioned `pixiv_archive` schema.
 
 ## Manual SQL initialization — no automatic DDL
 
@@ -344,7 +344,7 @@ restore, stop request/worker containers first and provide a privileged
 `MAINTENANCE_DATABASE_URL` capable of recreating archive tables:
 
 ```sh
-docker compose stop api worker maintenance
+docker compose stop api worker sync maintenance
 docker compose run --rm api python -m app.maintenance.backup restore \
   /data/pixiv/.backups/daily --confirm-destructive-restore
 docker compose up -d

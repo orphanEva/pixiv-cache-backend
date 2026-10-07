@@ -188,7 +188,11 @@ class SyncSource(Base):
     include_illust: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     include_novel: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=21600)
+    interval_seconds: Mapped[int] = mapped_column(
+        Integer().with_variant(MYSQL_INTEGER(unsigned=True), "mysql"),
+        nullable=False,
+        default=21600,
+    )
     frontier_json: Mapped[dict | None] = mapped_column(JSON)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime)
