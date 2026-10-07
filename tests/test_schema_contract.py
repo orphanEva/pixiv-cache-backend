@@ -14,6 +14,7 @@ def test_archive_schema_contract():
         "work_history",
         "work_history_files",
         "work_tag_relation",
+        "sync_sources",
     }
     assert set(Base.metadata.tables) == expected
     sql = Path("sql/pixiv_archive.sql").read_text()
@@ -36,6 +37,13 @@ def test_manual_v1_to_v2_upgrade_exists():
     assert "ON DUPLICATE KEY UPDATE" in sql
 
 
+def test_manual_v2_to_v3_upgrade_exists():
+    sql = Path("sql/upgrades/v2_to_v3.sql").read_text()
+    assert "CREATE TABLE sync_sources" in sql
+    assert "SET version = 3" in sql
+    assert "DROP TABLE" not in sql
+
+
 def test_app_never_runs_schema_mutations_on_start():
     dockerfile = Path("Dockerfile").read_text()
     assert "alembic upgrade" not in dockerfile
@@ -49,6 +57,13 @@ def test_compose_contains_separate_archive_worker():
     assert "worker:" in compose
     assert 'python", "-m", "app.workers.archive_worker' in compose
     assert "stop_grace_period: 30m" in compose
+
+
+def test_compose_contains_separate_sync_worker():
+    compose = Path("docker-compose.yml").read_text()
+    assert "sync:" in compose
+    assert 'python", "-m", "app.workers.sync_worker' in compose
+    assert "SYNC_WORKER_HEARTBEAT_KEY" in compose
 
 
 def test_compose_contains_separate_maintenance_worker():

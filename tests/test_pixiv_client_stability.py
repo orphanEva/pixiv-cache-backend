@@ -95,3 +95,35 @@ async def test_business_auth_error_payload_retries_after_forced_auth(monkeypatch
     result = await client._call(payload_call)
     assert result["ok"] is True
     assert calls == {"api": 2, "auth": 1}
+
+
+
+@pytest.mark.asyncio
+async def test_discovery_page_maps_remote_work_types_and_pagination(monkeypatch):
+    from app.models.work import WorkType
+
+    client = PixivPyClient()
+
+    async def fake_invoke(func, *args, **kwargs):
+        return {"offset": "30"}
+
+    monkeypatch.setattr(client, "_invoke_api", fake_invoke)
+    page = await client._discovery_page(
+        {
+            "illusts": [
+                {"id": 1, "type": "illust"},
+                {"id": 2, "type": "manga"},
+                {"id": 3, "type": "ugoira"},
+            ],
+            "next_url": "https://app-api.pixiv.net/v1/user/illusts?offset=30",
+        },
+        "illusts",
+        WorkType.ILLUST,
+    )
+
+    assert [(item.pixiv_id, item.work_type) for item in page.items] == [
+        (1, WorkType.ILLUST),
+        (2, WorkType.MANGA),
+        (3, WorkType.UGOIRA),
+    ]
+    assert page.next_params == {"offset": "30"}
