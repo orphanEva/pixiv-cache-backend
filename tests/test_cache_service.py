@@ -18,6 +18,7 @@ class FakeLock:
 
 class FakeRedis:
     def lock(self, *args, **kwargs): return FakeLock()
+    async def exists(self, key): return 0
 
 
 class FakeSession:
