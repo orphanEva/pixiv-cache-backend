@@ -1,5 +1,6 @@
 """Integration tests run ONLY against disposable CI MySQL+Redis after manual DDL."""
 from pathlib import Path
+import uuid
 import pytest
 from sqlalchemy import delete, func, select, text
 
@@ -196,3 +197,69 @@ async def test_manual_ddl_records_expected_schema_version():
             text("SELECT version FROM schema_version WHERE id = 1")
         )).scalar_one()
         assert actual == EXPECTED_SCHEMA_VERSION
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_redis_stream_archive_job_lifecycle():
+    from app.services.archive_jobs import ArchiveJobQueue
+
+    settings = get_settings()
+    suffix = uuid.uuid4().hex
+    old = {
+        "archive_job_stream": settings.archive_job_stream,
+        "archive_job_group": settings.archive_job_group,
+        "archive_job_status_prefix": settings.archive_job_status_prefix,
+        "archive_job_dedupe_prefix": settings.archive_job_dedupe_prefix,
+        "archive_job_claim_idle_ms": settings.archive_job_claim_idle_ms,
+    }
+    settings.archive_job_stream = f"test:archive:jobs:{suffix}"
+    settings.archive_job_group = f"test-workers-{suffix}"
+    settings.archive_job_status_prefix = f"test:archive:job:{suffix}:"
+    settings.archive_job_dedupe_prefix = f"test:archive:dedupe:{suffix}:"
+    settings.archive_job_claim_idle_ms = 1000
+
+    redis_client = get_redis()
+    queue = ArchiveJobQueue(redis_client)
+    try:
+        first = await queue.enqueue(WorkType.UGOIRA, 778899, force_refresh=True)
+        assert first["status"] == "queued"
+        assert first["kind"] == "illust"
+
+        duplicate = await queue.enqueue(WorkType.ILLUST, 778899, force_refresh=True)
+        assert duplicate["job_id"] == first["job_id"]
+        assert duplicate["deduplicated"] is True
+
+        item = await queue.read_one("test-consumer", block_ms=100)
+        assert item is not None
+        stream_id, job_id = item
+        assert job_id == first["job_id"]
+
+        running = await queue.mark_running(job_id, "test-consumer")
+        assert running["status"] == "running"
+        assert running["attempts"] == 1
+
+        await queue.touch(stream_id, "test-consumer")
+        await queue.mark_succeeded(job_id, {"version": 1})
+        await queue.ack(stream_id)
+
+        final = await queue.get(job_id)
+        assert final["status"] == "succeeded"
+        assert final["result"] == {"version": 1}
+
+        retried = await queue.retry(job_id)
+        assert retried["job_id"] != job_id
+        assert retried["status"] == "queued"
+
+        retry_item = await queue.read_one("test-consumer", block_ms=100)
+        assert retry_item is not None
+        await queue.mark_failed(retry_item[1], RuntimeError("test failure"))
+        await queue.ack(retry_item[0])
+        retry_final = await queue.get(retry_item[1])
+        assert retry_final["status"] == "failed"
+        assert retry_final["error_type"] == "RuntimeError"
+    finally:
+        await redis_client.delete(settings.archive_job_stream)
+        for key in await redis_client.keys(f"test:archive:*:{suffix}*"):
+            await redis_client.delete(key)
+        for key, value in old.items():
+            setattr(settings, key, value)

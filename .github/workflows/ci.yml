@@ -62,3 +62,25 @@ jobs:
         run: docker run --rm --entrypoint ffmpeg pixiv-cache-backend:ci -version
       - name: Verify headless Chromium launches
         run: docker run --rm --entrypoint python pixiv-cache-backend:ci scripts/check_playwright.py
+      - name: Verify compose worker config
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+      - name: Verify archive worker heartbeat
+        run: |
+          set -e
+          docker network create pixiv-ci
+          trap 'docker rm -f pixiv-ci-worker pixiv-ci-redis >/dev/null 2>&1 || true; docker network rm pixiv-ci >/dev/null 2>&1 || true' EXIT
+          docker run -d --name pixiv-ci-redis --network pixiv-ci redis:7.4-alpine
+          docker run -d --name pixiv-ci-worker --network pixiv-ci \
+            -e REDIS_URL=redis://pixiv-ci-redis:6379/0 \
+            -e SCHEMA_CHECK_ON_STARTUP=false \
+            pixiv-cache-backend:ci python -m app.workers.archive_worker
+          for i in $(seq 1 30); do
+            if docker exec pixiv-ci-worker python scripts/check_worker_health.py; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs pixiv-ci-worker
+          exit 1

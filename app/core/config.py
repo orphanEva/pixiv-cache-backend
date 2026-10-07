@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     serve_stale_on_remote_unavailable: bool = True
     max_asset_bytes: int = 150 * 1024 * 1024
     storage_audit_max_findings: int = 200
+    storage_min_free_bytes: int = 2 * 1024 * 1024 * 1024
+    storage_part_stale_seconds: int = 24 * 3600
+    storage_orphan_grace_seconds: int = 24 * 3600
     download_timeout_seconds: int = 120
     ugoira_generate_mp4: bool = True
     ugoira_keep_extracted_frames: bool = False
@@ -40,6 +43,17 @@ class Settings(BaseSettings):
     ugoira_max_frames: int = 10000
     ugoira_max_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024
     ffmpeg_binary: str = "ffmpeg"
+
+    archive_job_stream: str = "pixiv:archive:jobs"
+    archive_job_group: str = "pixiv-archive-workers"
+    archive_job_status_prefix: str = "pixiv:archive:job:"
+    archive_job_dedupe_prefix: str = "pixiv:archive:dedupe:"
+    archive_job_status_ttl_seconds: int = 7 * 24 * 3600
+    archive_job_dedupe_ttl_seconds: int = 6 * 3600
+    archive_job_claim_idle_ms: int = 15 * 60 * 1000
+    archive_worker_block_ms: int = 5000
+    archive_worker_heartbeat_key: str = "pixiv:archive:worker:healthy"
+    archive_worker_heartbeat_ttl_seconds: int = 30
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

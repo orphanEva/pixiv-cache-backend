@@ -42,3 +42,10 @@ def test_app_never_runs_schema_mutations_on_start():
     assert "pixiv_archive.sql" not in dockerfile
     compose = Path("docker-compose.yml").read_text()
     assert "image: mysql:" not in compose
+
+
+def test_compose_contains_separate_archive_worker():
+    compose = Path("docker-compose.yml").read_text()
+    assert "worker:" in compose
+    assert 'python", "-m", "app.workers.archive_worker' in compose
+    assert "stop_grace_period: 30m" in compose
