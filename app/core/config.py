@@ -63,6 +63,15 @@ class Settings(BaseSettings):
     maintenance_database_url: str = ""
     backup_root: Path = Path("/data/pixiv/.backups")
 
+    integrity_audit_interval_seconds: int = 6 * 3600
+    integrity_audit_initial_delay_seconds: int = 60
+    integrity_audit_verify_hash: bool = False
+    integrity_audit_repair_safe: bool = False
+    integrity_worker_lock_key: str = "pixiv:maintenance:integrity-lock"
+    integrity_worker_lock_ttl_seconds: int = 30 * 60
+    integrity_worker_heartbeat_key: str = "pixiv:integrity:worker:healthy"
+    integrity_worker_heartbeat_ttl_seconds: int = 30
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
