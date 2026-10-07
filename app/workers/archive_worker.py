@@ -9,6 +9,7 @@ import socket
 from app.clients.pixivpy_client import PixivPyClient
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.core.maintenance import maintenance_active
 from app.core.redis_client import close_redis, get_redis
 from app.core.schema_version import ensure_schema_version
 from app.db.session import SessionLocal, engine
@@ -37,6 +38,9 @@ class ArchiveWorker:
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
             while not self.stop_event.is_set():
+                if await maintenance_active(self.redis):
+                    await asyncio.sleep(2)
+                    continue
                 item = await self.queue.read_one(
                     self.consumer,
                     block_ms=self.settings.archive_worker_block_ms,

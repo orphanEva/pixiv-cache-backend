@@ -20,3 +20,7 @@ class PixivUnavailableError(PixivRemoteError):
 
 class ArchiveStorageError(PixivRemoteError):
     status_code = 507
+
+
+class ArchiveMaintenanceError(PixivRemoteError):
+    status_code = 503

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     api_key: str = ""
     remote_check_ttl_seconds: int = 0
     pixiv_deep_image_check: bool = False
+    cache_lock_prefix: str = "pixiv-cache:"
     lock_ttl_seconds: int = 180
     lock_wait_seconds: int = 30
     serve_stale_on_remote_unavailable: bool = True
@@ -54,6 +55,13 @@ class Settings(BaseSettings):
     archive_worker_block_ms: int = 5000
     archive_worker_heartbeat_key: str = "pixiv:archive:worker:healthy"
     archive_worker_heartbeat_ttl_seconds: int = 30
+
+    maintenance_freeze_key: str = "pixiv:maintenance:freeze"
+    maintenance_freeze_ttl_seconds: int = 2 * 3600
+    maintenance_freeze_wait_seconds: int = 5
+    maintenance_wait_for_writers_seconds: int = 30 * 60
+    maintenance_database_url: str = ""
+    backup_root: Path = Path("/data/pixiv/.backups")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
