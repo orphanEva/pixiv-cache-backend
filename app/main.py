@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from app.api.admin import router as admin_router
 from app.api.media import router as media_router
 from app.api.pixiv_auth import router as pixiv_auth_router
+from app.api.jobs import router as jobs_router
 from app.api.routes import router
 from app.api.health import router as health_router
 from app.core.config import get_settings
@@ -35,7 +36,7 @@ async def lifespan(app: FastAPI):
     logger.info("application_stopped")
 
 
-app = FastAPI(title=settings.app_name, version="1.1.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.2.0", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -60,3 +61,4 @@ app.include_router(health_router)
 app.include_router(admin_router)
 app.include_router(media_router)
 app.include_router(pixiv_auth_router)
+app.include_router(jobs_router)

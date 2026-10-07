@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     ugoira_max_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024
     ffmpeg_binary: str = "ffmpeg"
 
+    archive_job_stream: str = "pixiv:archive:jobs"
+    archive_job_group: str = "pixiv-archive-workers"
+    archive_job_status_prefix: str = "pixiv:archive:job:"
+    archive_job_dedupe_prefix: str = "pixiv:archive:dedupe:"
+    archive_job_status_ttl_seconds: int = 7 * 24 * 3600
+    archive_job_dedupe_ttl_seconds: int = 6 * 3600
+    archive_job_claim_idle_ms: int = 15 * 60 * 1000
+    archive_worker_block_ms: int = 5000
+    archive_worker_heartbeat_key: str = "pixiv:archive:worker:healthy"
+    archive_worker_heartbeat_ttl_seconds: int = 30
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
