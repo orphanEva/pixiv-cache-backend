@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI):
     logger.info("application_stopped")
 
 
-app = FastAPI(title=settings.app_name, version="1.2.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.3.0", lifespan=lifespan)
 
 
 @app.middleware("http")

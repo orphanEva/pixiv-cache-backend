@@ -46,6 +46,10 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -e '.[dev]'
+      - name: Install MySQL client for backup/restore integration
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y default-mysql-client
       # Deliberately explicit: application startup NEVER runs DDL.
       - name: Initialize disposable CI MySQL from manual SQL
         run: python scripts/init_ci_schema.py
@@ -60,27 +64,54 @@ jobs:
         run: docker build -t pixiv-cache-backend:ci .
       - name: Verify FFmpeg exists in image
         run: docker run --rm --entrypoint ffmpeg pixiv-cache-backend:ci -version
+      - name: Verify MySQL backup/restore client exists
+        run: |
+          docker run --rm --entrypoint sh pixiv-cache-backend:ci -c \
+            '(command -v mysqldump || command -v mariadb-dump) && (command -v mysql || command -v mariadb)'
       - name: Verify headless Chromium launches
         run: docker run --rm --entrypoint python pixiv-cache-backend:ci scripts/check_playwright.py
       - name: Verify compose worker config
         run: |
           cp .env.example .env
           docker compose config --quiet
-      - name: Verify archive worker heartbeat
+      - name: Verify archive and maintenance worker heartbeats
         run: |
           set -e
           docker network create pixiv-ci
-          trap 'docker rm -f pixiv-ci-worker pixiv-ci-redis >/dev/null 2>&1 || true; docker network rm pixiv-ci >/dev/null 2>&1 || true' EXIT
+          trap 'docker rm -f pixiv-ci-worker pixiv-ci-maintenance pixiv-ci-redis >/dev/null 2>&1 || true; docker network rm pixiv-ci >/dev/null 2>&1 || true' EXIT
           docker run -d --name pixiv-ci-redis --network pixiv-ci redis:7.4-alpine
           docker run -d --name pixiv-ci-worker --network pixiv-ci \
             -e REDIS_URL=redis://pixiv-ci-redis:6379/0 \
             -e SCHEMA_CHECK_ON_STARTUP=false \
             pixiv-cache-backend:ci python -m app.workers.archive_worker
+          archive_ok=0
           for i in $(seq 1 30); do
             if docker exec pixiv-ci-worker python scripts/check_worker_health.py; then
-              exit 0
+              archive_ok=1
+              break
             fi
             sleep 1
           done
-          docker logs pixiv-ci-worker
-          exit 1
+          if [ "$archive_ok" != "1" ]; then
+            docker logs pixiv-ci-worker
+            exit 1
+          fi
+
+          docker run -d --name pixiv-ci-maintenance --network pixiv-ci \
+            -e REDIS_URL=redis://pixiv-ci-redis:6379/0 \
+            -e SCHEMA_CHECK_ON_STARTUP=false \
+            -e INTEGRITY_AUDIT_INTERVAL_SECONDS=0 \
+            -e WORKER_HEARTBEAT_KEY=pixiv:integrity:worker:healthy \
+            pixiv-cache-backend:ci python -m app.workers.integrity_worker
+          maintenance_ok=0
+          for i in $(seq 1 30); do
+            if docker exec pixiv-ci-maintenance python scripts/check_worker_health.py; then
+              maintenance_ok=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$maintenance_ok" != "1" ]; then
+            docker logs pixiv-ci-maintenance
+            exit 1
+          fi

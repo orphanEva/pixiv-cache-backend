@@ -14,6 +14,7 @@ from app.clients.base import PixivClient
 from app.core.config import get_settings
 from app.core.security import cache_read_allowed
 from app.core.redis_lock import RenewingRedisLock
+from app.core.maintenance import require_writes_allowed
 from app.core.errors import (
     PixivAuthError, PixivNotFoundError, PixivRemoteError,
     PixivRestrictedError, PixivUnavailableError,
@@ -91,9 +92,10 @@ class CacheService:
             if (now_utc() - utc_naive(work.last_checked_at)).total_seconds() < self.settings.remote_check_ttl_seconds:
                 return self._to_response(work, "local-recently-validated")
 
+        await require_writes_allowed(self.redis)
         lock = RenewingRedisLock(
             self.redis,
-            f"pixiv-cache:{work_type.value}:{pixiv_id}",
+            f"{self.settings.cache_lock_prefix}{work_type.value}:{pixiv_id}",
             ttl_seconds=self.settings.lock_ttl_seconds,
             wait_seconds=self.settings.lock_wait_seconds,
         )
@@ -105,6 +107,9 @@ class CacheService:
             raise PixivUnavailableError("Cache lock could not be acquired")
 
         try:
+            # Close the race where maintenance begins after the first check but
+            # before this request acquires its per-work lock.
+            await require_writes_allowed(self.redis)
             work = await self._load(pixiv_id, work_type)
             if work and not refresh:
                 self._require_local_access(work)

@@ -49,3 +49,10 @@ def test_compose_contains_separate_archive_worker():
     assert "worker:" in compose
     assert 'python", "-m", "app.workers.archive_worker' in compose
     assert "stop_grace_period: 30m" in compose
+
+
+def test_compose_contains_separate_maintenance_worker():
+    compose = Path("docker-compose.yml").read_text()
+    assert "maintenance:" in compose
+    assert 'python", "-m", "app.workers.integrity_worker' in compose
+    assert "WORKER_HEARTBEAT_KEY" in compose
