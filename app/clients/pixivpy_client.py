@@ -24,7 +24,7 @@ from app.core.errors import (
     PixivUnavailableError,
 )
 from app.models.work import WorkType
-from app.schemas.pixiv import RemoteSnapshot
+from app.schemas.pixiv import DiscoveredWork, DiscoveryPage, RemoteSnapshot
 
 
 class PixivPyClient(PixivClient):
@@ -86,17 +86,17 @@ class PixivPyClient(PixivClient):
 
             self._next_auth_at = time.monotonic() + 45 * 60
 
-    async def _call(self, func, *args):
+    async def _call(self, func, *args, **kwargs):
         await self._ensure_auth()
         try:
-            result = await self._invoke_api(func, *args)
+            result = await self._invoke_api(func, *args, **kwargs)
             self._raise_for_pixiv_error(result)
             return result
         except PixivAuthError:
             self._next_auth_at = 0.0
             await self._ensure_auth(force=True)
             try:
-                result = await self._invoke_api(func, *args)
+                result = await self._invoke_api(func, *args, **kwargs)
                 self._raise_for_pixiv_error(result)
                 return result
             except PixivRemoteError:
@@ -110,7 +110,7 @@ class PixivPyClient(PixivClient):
                 self._next_auth_at = 0.0
                 await self._ensure_auth(force=True)
                 try:
-                    result = await self._invoke_api(func, *args)
+                    result = await self._invoke_api(func, *args, **kwargs)
                     self._raise_for_pixiv_error(result)
                     return result
                 except PixivRemoteError:
@@ -308,3 +308,87 @@ class PixivPyClient(PixivClient):
         return build_novel_snapshot(
             getattr(detail_result, "novel", None), text_result, pixiv_id
         )
+
+    async def get_authenticated_user_id(self) -> int:
+        await self._ensure_auth()
+        async with self._api_lock:
+            value = getattr(self.api, "user_id", None)
+        if not value:
+            raise PixivAuthError("Pixiv authenticated user id is unavailable")
+        return int(value)
+
+    async def discover_author_illusts(
+        self, user_id: int, next_params: dict | None = None
+    ) -> DiscoveryPage:
+        if next_params:
+            result = await self._call(self.api.user_illusts, **next_params)
+        else:
+            # Omitting the API type filter lets Pixiv return the user's visual
+            # works and preserves manga/ugoira types in each item.
+            result = await self._call(self.api.user_illusts, user_id, type=None)
+        return await self._discovery_page(result, "illusts", WorkType.ILLUST)
+
+    async def discover_author_novels(
+        self, user_id: int, next_params: dict | None = None
+    ) -> DiscoveryPage:
+        result = (
+            await self._call(self.api.user_novels, **next_params)
+            if next_params
+            else await self._call(self.api.user_novels, user_id)
+        )
+        return await self._discovery_page(result, "novels", WorkType.NOVEL)
+
+    async def discover_bookmark_illusts(
+        self, user_id: int, restrict: str, next_params: dict | None = None
+    ) -> DiscoveryPage:
+        result = (
+            await self._call(self.api.user_bookmarks_illust, **next_params)
+            if next_params
+            else await self._call(
+                self.api.user_bookmarks_illust, user_id, restrict=restrict
+            )
+        )
+        return await self._discovery_page(result, "illusts", WorkType.ILLUST)
+
+    async def discover_bookmark_novels(
+        self, user_id: int, restrict: str, next_params: dict | None = None
+    ) -> DiscoveryPage:
+        result = (
+            await self._call(self.api.user_bookmarks_novel, **next_params)
+            if next_params
+            else await self._call(
+                self.api.user_bookmarks_novel, user_id, restrict=restrict
+            )
+        )
+        return await self._discovery_page(result, "novels", WorkType.NOVEL)
+
+    async def _discovery_page(
+        self,
+        result: Any,
+        collection_name: str,
+        default_type: WorkType,
+    ) -> DiscoveryPage:
+        data = to_dict(result)
+        if not isinstance(data, dict):
+            raise PixivRemoteError("Pixiv discovery response is not an object")
+        raw_items = data.get(collection_name) or []
+        items: list[DiscoveredWork] = []
+        for raw in raw_items:
+            if not isinstance(raw, dict) or raw.get("id") is None:
+                continue
+            work_type = default_type
+            if default_type != WorkType.NOVEL:
+                raw_type = str(raw.get("type") or "illust")
+                if raw_type in ("illust", "manga", "ugoira"):
+                    work_type = WorkType(raw_type)
+            items.append(
+                DiscoveredWork(
+                    pixiv_id=int(raw["id"]),
+                    work_type=work_type,
+                )
+            )
+        next_url = data.get("next_url")
+        next_params = None
+        if next_url:
+            next_params = await self._invoke_api(self.api.parse_qs, next_url)
+        return DiscoveryPage(items=items, next_params=next_params)
