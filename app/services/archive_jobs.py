@@ -216,6 +216,13 @@ class ArchiveJobQueue:
             await pipe.execute()
         return await self.get(job_id)
 
+    async def mark_finalizing(self, job_id: str) -> dict[str, Any] | None:
+        key = self.status_key(job_id)
+        if not await self.redis.exists(key):
+            return None
+        await self.redis.hset(key, "status", "finalizing")
+        return await self.get(job_id)
+
     async def mark_succeeded(self, job_id: str, result: dict[str, Any]) -> None:
         await self.redis.hset(
             self.status_key(job_id),

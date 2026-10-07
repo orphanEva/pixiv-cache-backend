@@ -447,17 +447,42 @@ class LibraryService:
         )
 
     async def get_author(self, author_id: str) -> AuthorSummary | None:
-        result = await self.list_authors(
-            page=1,
-            page_size=1,
-            q=author_id,
-            sort="works",
-            order="desc",
+        works_count = func.count(PixivWork.id)
+        row = (
+            await self.session.execute(
+                select(
+                    PixivWork.author_id,
+                    func.max(PixivWork.author_name).label("author_name"),
+                    works_count.label("works"),
+                    func.sum(case((PixivWork.work_type == WorkType.ILLUST, 1), else_=0)).label("illusts"),
+                    func.sum(case((PixivWork.work_type == WorkType.MANGA, 1), else_=0)).label("mangas"),
+                    func.sum(case((PixivWork.work_type == WorkType.UGOIRA, 1), else_=0)).label("ugoira"),
+                    func.sum(case((PixivWork.work_type == WorkType.NOVEL, 1), else_=0)).label("novels"),
+                    func.max(
+                        func.coalesce(
+                            PixivWork.remote_updated_at,
+                            PixivWork.remote_created_at,
+                        )
+                    ).label("latest_remote_at"),
+                    func.max(PixivWork.cached_at).label("latest_cached_at"),
+                )
+                .where(PixivWork.author_id == author_id)
+                .group_by(PixivWork.author_id)
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        return AuthorSummary(
+            author_id=int(row.author_id),
+            author_name=row.author_name or "",
+            works=int(row.works or 0),
+            illusts=int(row.illusts or 0),
+            mangas=int(row.mangas or 0),
+            ugoira=int(row.ugoira or 0),
+            novels=int(row.novels or 0),
+            latest_remote_at=row.latest_remote_at,
+            latest_cached_at=row.latest_cached_at,
         )
-        for item in result.items:
-            if str(item.author_id) == author_id:
-                return item
-        return None
 
     async def list_tags(
         self,
@@ -669,10 +694,14 @@ class LibraryService:
                 select(func.count()).select_from(WorkSource)
             )
         ).scalar_one()
+        type_counts = {value.value: 0 for value in WorkType}
+        type_counts.update({row[0].value: int(row[1]) for row in type_rows})
+        status_counts = {value.value: 0 for value in WorkStatus}
+        status_counts.update({row[0].value: int(row[1]) for row in status_rows})
         return LibraryStats(
             works_total=int(total),
-            works_by_type={row[0].value: int(row[1]) for row in type_rows},
-            works_by_status={row[0].value: int(row[1]) for row in status_rows},
+            works_by_type=type_counts,
+            works_by_status=status_counts,
             authors=int(authors),
             tags=int(tags),
             series=int(series),
