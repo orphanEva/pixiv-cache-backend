@@ -66,6 +66,8 @@ class SyncWorker:
             logger.info("sync_worker_stopped", extra={"consumer": self.consumer})
 
     async def _schedule_due_if_needed(self) -> None:
+        if self.settings.sync_scheduler_poll_seconds <= 0:
+            return
         loop = asyncio.get_running_loop()
         now_mono = loop.time()
         if now_mono - self._last_schedule < self.settings.sync_scheduler_poll_seconds:
