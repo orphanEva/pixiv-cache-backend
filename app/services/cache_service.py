@@ -107,6 +107,9 @@ class CacheService:
             raise PixivUnavailableError("Cache lock could not be acquired")
 
         try:
+            # Close the race where maintenance begins after the first check but
+            # before this request acquires its per-work lock.
+            await require_writes_allowed(self.redis)
             work = await self._load(pixiv_id, work_type)
             if work and not refresh:
                 self._require_local_access(work)

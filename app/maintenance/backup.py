@@ -64,16 +64,17 @@ class ArchiveBackupManager:
             raise BackupError(f"Backup target already exists: {target}")
         target.mkdir(parents=True, exist_ok=False)
 
-        async with MaintenanceFreeze(self.redis):
-            source_bytes = self._storage_source_bytes()
-            self._ensure_backup_capacity(source_bytes)
+        try:
+            async with MaintenanceFreeze(self.redis):
+                source_bytes = self._storage_source_bytes()
+                self._ensure_backup_capacity(source_bytes)
 
-            database_path = target / "database.sql"
-            storage_path = target / "storage.tar.gz"
-            await asyncio.to_thread(self._dump_database, database_path)
-            await asyncio.to_thread(self._archive_storage, storage_path)
+                database_path = target / "database.sql"
+                storage_path = target / "storage.tar.gz"
+                await asyncio.to_thread(self._dump_database, database_path)
+                await asyncio.to_thread(self._archive_storage, storage_path)
 
-            manifest = {
+                manifest = {
                 "format_version": FORMAT_VERSION,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "app_version": application_version(),
@@ -87,9 +88,12 @@ class ArchiveBackupManager:
                 "storage_sha256": sha256_file(storage_path),
                 "credentials_included": False,
                 "quarantine_included": False,
-                "redis_jobs_included": False,
-            }
-            self._write_json(target / "manifest.json", manifest)
+                    "redis_jobs_included": False,
+                }
+                self._write_json(target / "manifest.json", manifest)
+        except Exception:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
         return {"backup_path": str(target), "manifest": manifest}
 
     def verify(self, backup_dir: Path) -> dict[str, Any]:
@@ -199,11 +203,12 @@ class ArchiveBackupManager:
             "--quick",
             "--hex-blob",
             "--skip-lock-tables",
-            "--no-tablespaces",
             "--default-character-set=utf8mb4",
             "--databases",
             str(url.database),
         ]
+        if self._supports_option(binary, "no-tablespaces"):
+            cmd.insert(-2, "--no-tablespaces")
         env = os.environ.copy()
         if url.password:
             env["MYSQL_PWD"] = url.password
@@ -249,6 +254,18 @@ class ArchiveBackupManager:
             )
 
     @staticmethod
+    def _supports_option(binary: str, option: str) -> bool:
+        result = subprocess.run(
+            [binary, "--help"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        return option.lower() in result.stdout.decode(
+            "utf-8", errors="replace"
+        ).lower()
+
+    @staticmethod
     def _mysql_connection_args(binary: str, url: URL) -> list[str]:
         cmd = [binary]
         if url.host:
@@ -263,30 +280,46 @@ class ArchiveBackupManager:
         with tarfile.open(output, "w:gz") as archive:
             for name in ARCHIVE_DIRS:
                 source = self.storage_root / name
-                if source.exists():
-                    archive.add(source, arcname=name, recursive=True)
+                if not source.exists():
+                    continue
+                for path in source.rglob("*"):
+                    if path.is_symlink():
+                        raise BackupError(
+                            f"Refusing to archive symlink inside storage: {path}"
+                        )
+                archive.add(source, arcname=name, recursive=True)
 
     def _extract_storage(self, archive_path: Path, staging: Path) -> None:
         with tarfile.open(archive_path, "r:gz") as archive:
             for member in archive.getmembers():
-                top = Path(member.name).parts[0] if Path(member.name).parts else ""
-                if top not in ARCHIVE_DIRS:
-                    raise BackupError(
-                        f"Unexpected top-level path in storage archive: {member.name}"
-                    )
-                destination = (staging / member.name).resolve()
-                try:
-                    destination.relative_to(staging.resolve())
-                except ValueError:
-                    raise BackupError(
-                        f"Unsafe path in storage archive: {member.name}"
-                    ) from None
+                self._validate_tar_member(member, staging)
             archive.extractall(staging, filter="data")
 
     def _validate_tar(self, archive_path: Path) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            staging = Path(tmp)
-            self._extract_storage(archive_path, staging)
+        with tarfile.open(archive_path, "r:gz") as archive:
+            fake_root = Path("/archive-validation-root")
+            for member in archive.getmembers():
+                self._validate_tar_member(member, fake_root)
+
+    @staticmethod
+    def _validate_tar_member(member: tarfile.TarInfo, root: Path) -> None:
+        parts = Path(member.name).parts
+        top = parts[0] if parts else ""
+        if top not in ARCHIVE_DIRS:
+            raise BackupError(
+                f"Unexpected top-level path in storage archive: {member.name}"
+            )
+        if member.issym() or member.islnk():
+            raise BackupError(
+                f"Links are not allowed in storage archive: {member.name}"
+            )
+        destination = (root / member.name).resolve()
+        try:
+            destination.relative_to(root.resolve())
+        except ValueError:
+            raise BackupError(
+                f"Unsafe path in storage archive: {member.name}"
+            ) from None
 
     def _swap_storage_in(self, staging: Path, rollback_root: Path) -> None:
         rollback_root.mkdir(parents=True, exist_ok=False)
@@ -397,16 +430,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def _run_and_close(args) -> dict[str, Any]:
+    try:
+        return await async_main(args)
+    finally:
+        await close_redis()
+        await engine.dispose()
+
+
 def main() -> None:
     args = build_parser().parse_args()
-    try:
-        result = asyncio.run(async_main(args))
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    finally:
-        try:
-            asyncio.run(close_redis())
-        except RuntimeError:
-            pass
+    result = asyncio.run(_run_and_close(args))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
