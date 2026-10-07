@@ -41,8 +41,12 @@ class MaintenanceFreeze:
             raise ArchiveMaintenanceError(
                 "Could not acquire archive maintenance freeze"
             )
-        await self.wait_for_active_writers()
-        return self
+        try:
+            await self.wait_for_active_writers()
+            return self
+        except Exception:
+            await self.lock.release()
+            raise
 
     async def __aexit__(self, exc_type, exc, tb):
         await self.lock.release()
