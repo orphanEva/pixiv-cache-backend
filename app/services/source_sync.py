@@ -48,6 +48,7 @@ class SourceSyncService:
                     ),
                     set(str(v) for v in (previous.get("illust") or [])),
                     full=full,
+                    source_id=source.id,
                 )
                 next_frontier["illust"] = result["frontier"]
                 self._merge_totals(totals, result)
@@ -59,6 +60,7 @@ class SourceSyncService:
                     ),
                     set(str(v) for v in (previous.get("novel") or [])),
                     full=full,
+                    source_id=source.id,
                 )
                 next_frontier["novel"] = result["frontier"]
                 self._merge_totals(totals, result)
@@ -113,7 +115,14 @@ class SourceSyncService:
             user_id, source.restrict_mode.value, params
         )
 
-    async def _scan(self, fetch_page, old_frontier: set[str], *, full: bool) -> dict:
+    async def _scan(
+        self,
+        fetch_page,
+        old_frontier: set[str],
+        *,
+        full: bool,
+        source_id: int | None = None,
+    ) -> dict:
         next_params = None
         new_frontier: list[str] = []
         seen: set[tuple[str, int]] = set()
@@ -150,6 +159,7 @@ class SourceSyncService:
                     normalized,
                     item.pixiv_id,
                     force_refresh=True,
+                    source_id=source_id,
                 )
                 jobs += 1
 

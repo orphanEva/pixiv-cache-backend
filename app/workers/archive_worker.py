@@ -6,6 +6,8 @@ import os
 import signal
 import socket
 
+from sqlalchemy import select
+
 from app.clients.pixivpy_client import PixivPyClient
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -13,9 +15,9 @@ from app.core.maintenance import maintenance_active
 from app.core.redis_client import close_redis, get_redis
 from app.core.schema_version import ensure_schema_version
 from app.db.session import SessionLocal, engine
-from app.models.work import WorkType
+from app.models.work import SyncSource, WorkSource, WorkType
 from app.services.archive_jobs import ArchiveJobQueue
-from app.services.cache_service import CacheService
+from app.services.cache_service import CacheService, now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,11 @@ class ArchiveWorker:
                     refresh=True,
                     bypass_ttl=bool(job["force_refresh"]),
                 )
+                await self._record_sources(
+                    session,
+                    str(result.pixiv_id),
+                    job.get("source_ids") or [],
+                )
             await self.queue.mark_succeeded(
                 job_id,
                 result.model_dump(mode="json"),
@@ -104,6 +111,42 @@ class ArchiveWorker:
             except asyncio.CancelledError:
                 pass
             await self.queue.ack(stream_id)
+
+    async def _record_sources(
+        self,
+        session,
+        work_id: str,
+        source_ids: list[int],
+    ) -> None:
+        if not source_ids:
+            return
+        valid = set(
+            (
+                await session.execute(
+                    select(SyncSource.id).where(SyncSource.id.in_(source_ids))
+                )
+            ).scalars().all()
+        )
+        if not valid:
+            return
+        now = now_utc()
+        for source_id in sorted(valid):
+            relation = await session.get(
+                WorkSource,
+                {"work_id": work_id, "source_id": source_id},
+            )
+            if relation is None:
+                session.add(
+                    WorkSource(
+                        work_id=work_id,
+                        source_id=source_id,
+                        first_seen_at=now,
+                        last_seen_at=now,
+                    )
+                )
+            else:
+                relation.last_seen_at = now
+        await session.commit()
 
     async def _touch_job_lease(self, stream_id: str) -> None:
         interval = max(5, self.settings.archive_job_claim_idle_ms // 3000)
