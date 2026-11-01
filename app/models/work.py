@@ -71,6 +71,21 @@ class Series(Base):
     __table_args__ = (Index("idx_series_author", "author_id"), Index("idx_series_type", "type"))
 
 
+
+class SeriesMember(Base):
+    """系列发现成员：未下载成功的作品同样可以追踪。"""
+    __tablename__ = "series_members"
+    series_id: Mapped[str] = mapped_column(String(32), ForeignKey("series.id", ondelete="CASCADE"), primary_key=True)
+    work_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    work_type: Mapped[str] = mapped_column(Enum("novel", "manga"), nullable=False)
+    series_order: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(Enum("discovered", "queued", "archived", "failed"), nullable=False, default="discovered")
+    last_error: Mapped[str | None] = mapped_column(String(1000))
+    discovered_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+    __table_args__ = (Index("idx_series_members_status", "series_id", "status"), Index("idx_series_members_work", "work_id"),)
+
+
 class Tag(Base):
     __tablename__ = "tags"
     id: Mapped[int] = mapped_column(Integer().with_variant(MYSQL_INTEGER(unsigned=True), 'mysql'), primary_key=True, autoincrement=True)
@@ -148,6 +163,7 @@ class PixivAsset(Base):
     remote_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
     version: Mapped["PixivVersion"] = relationship(back_populates="assets")
+    __table_args__ = (UniqueConstraint("history_id", "page_index", "file_type", name="uk_history_file_identity"),)
 
 
 class CurrentFile(Base):
@@ -161,6 +177,7 @@ class CurrentFile(Base):
     sha256: Mapped[str | None] = mapped_column("file_hash", String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
     work: Mapped["PixivWork"] = relationship(back_populates="current_files")
+    __table_args__ = (UniqueConstraint("work_id", "page_index", "file_type", name="uk_work_file_identity"),)
 
 
 class WorkTagRelation(Base):
