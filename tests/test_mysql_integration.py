@@ -143,6 +143,16 @@ async def test_series_namespaces_and_composite_foreign_keys():
             select(SeriesMember).where(SeriesMember.series_id == shared)
         )).scalars().all()
         assert len(items) == 2
+        # 外键允许相同 remote_id，但 CHECK 不允许把小说挂在漫画系列类型上。
+        from sqlalchemy import text
+        with pytest.raises(IntegrityError):
+            await session.execute(text(
+                "INSERT INTO works (id,type,status,series_type,series_id,title,author_id,"
+                "author_name,page_count,version_token) VALUES "
+                "('9876500001','novel','active','manga',:sid,'bad','1','A',1,:token)"
+            ), {"sid": shared, "token": "a" * 64})
+            await session.commit()
+        await session.rollback()
         await session.execute(delete(Series).where(Series.id == shared))
         await session.commit()
 
