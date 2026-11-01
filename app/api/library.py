@@ -40,6 +40,7 @@ async def list_works(
     status_filter: list[WorkStatus] | None = Query(None, alias="status"),
     author_id: str | None = Query(None),
     series_id: str | None = Query(None),
+    series_type: Literal["novel", "manga"] | None = Query(None),
     tag: list[str] | None = Query(None),
     tag_mode: Literal["all", "any"] = Query("all"),
     source_id: int | None = Query(None, ge=1),
@@ -68,6 +69,7 @@ async def list_works(
         statuses=status_filter,
         author_id=author_id,
         series_id=series_id,
+        series_type=series_type,
         tags=tag,
         tag_mode=tag_mode,
         source_id=source_id,
@@ -250,12 +252,13 @@ async def list_series(
     )
 
 
-@router.get("/series/{series_id}", response_model=SeriesSummary)
+@router.get("/series/{series_type}/{series_id}", response_model=SeriesSummary)
 async def get_series(
+    series_type: Literal["novel", "manga"],
     series_id: str,
     session: AsyncSession = Depends(get_session),
 ):
-    result = await service(session).get_series(series_id)
+    result = await service(session).get_series(series_type, series_id)
     if result is None:
         raise HTTPException(404, "Archived series not found")
     return result
