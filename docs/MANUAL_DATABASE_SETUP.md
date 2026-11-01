@@ -1,107 +1,66 @@
-# pixiv_archive: manual MySQL initialization
+# pixiv_archive 数据库初始化（全新项目 / Schema v6）
 
-**New, empty MySQL 8.0+ database only.** This project does not create any
-production database, table, or migration record at runtime.
+> 当前项目尚未投入使用，因此采用重新设计后的 **v6 全新建库结构**。
+> 原有 v1-v5 升级脚本不适用于 v6，**不要按旧脚本逐级升级**。
 
-1. Review [sql/pixiv_archive.sql](../sql/pixiv_archive.sql). It is the new
-   canonical DDL based on the supplied seven archive tables plus the
-   `schema_version` metadata table used to verify manual upgrades.
-2. Open your MySQL administrator client (Navicat/DataGrip/mysql CLI),
-   and manually run the SQL **once on a new database**.
-3. Create your own restricted application user. For example, update the
-   password and allowed host below:
+## 1. 手动初始化（MySQL 8.0+）
+
+确认 `pixiv_archive` 数据库中没有需要保留的数据。使用 MySQL 管理员执行：
+
+```bash
+mysql -h MYSQL_HOST -u root -p < sql/pixiv_archive.sql
+```
+
+DDL 不包含 DROP TABLE，适合空库。非空库请先单独备份，不要直接运行此脚本覆盖。
+程序容器不建表或自动升级（禁止运行时 DDL），仅检查 `schema_version=6`。
+
+## 2. 创建专用 DML 账号
 
 ```sql
 CREATE USER 'pixiv'@'YOUR_API_HOST' IDENTIFIED BY 'YOUR_OWN_PASSWORD';
 GRANT SELECT, INSERT, UPDATE, DELETE ON pixiv_archive.* TO 'pixiv'@'YOUR_API_HOST';
 ```
 
-4. Set `DATABASE_URL` in the private `.env`, e.g.
-   `mysql+asyncmy://pixiv:PASSWORD@MYSQL_HOST:3306/pixiv_archive?charset=utf8mb4`.
-   URL-encode reserved password characters; do not commit your `.env`.
-5. Supply a private Pixiv refresh token and an API key of at least 32
-   random characters; start with `docker compose up -d --build`.
-6. Verify `curl http://127.0.0.1:18081/health/ready` reports MySQL, schema and
-   Redis readiness.
+在 `.env` 中填入编码后的连接信息：
+`DATABASE_URL=mysql+asyncmy://pixiv:PASSWORD@MYSQL_HOST:3306/pixiv_archive?charset=utf8mb4`。
+不要提交 `.env`，也不要把 MySQL 直接暴露公网。
 
-## Existing installations or imported data
+## 3. 结构说明
 
-Do NOT execute the new-install script over an existing
-`pixiv_archive` or `pixiv_cache` database that contains data, and
-do not execute the original dump with `DROP TABLE IF EXISTS`.
-The original dump had no reliable `version_token`, could require a
-nonexistent `remote_update_at`, and recorded only prior versions in
-`work_history`. This application requires **all** version records,
-including the current one, with registered media paths. Migrating
-existing rows and files requires a separately reviewed and verified
-data/file migration, with a full backup and rollback plan.
+| 表 | 用途 |
+|---|---|
+| `schema_version` | 手动结构版本锁定 |
+| `series` | 漫画与小说合集，联合主键 `(type,id)` |
+| `series_members` | 合集成员与下载进度，联合主键 `(series_type,series_id,work_id)` |
+| `works` | 当前作品数据及 `(series_type,series_id)` 联合外键 |
+| `work_history` | 不可变作品版本 |
+| `work_files` | 当前版本文件索引（作品/页码/类型唯一） |
+| `work_history_files` | 历史文件索引（版本/页码/类型唯一） |
+| `tags` / `work_tag_relation` | 标签与作品关联 |
+| `sync_sources` / `work_sources` | 作者/收藏同步来源及归因 |
 
-The API account needs only DML privileges. Production containers do
-not execute Alembic or run `CREATE TABLE`. CI initialization is
-intentionally restricted to the disposable GitHub Actions MySQL.
+`series_members` **故意不为 work_id 设置作品外键**：发现作品可以先写入，
+待实际下载归档后才会创建 `works` 记录。
 
+`works` 的系列类型必须和作品类型对应：
+`novel` 作品只能挂在小说系列下，`manga` 作品只能挂在漫画系列下。
+系列 ID 和系列类型要么同时为空，要么同时有值。
+同一个远端系列数字 ID 可以分别出现在小说系列和漫画系列中。
 
-## Manual schema upgrades
+## 4. 启动
 
-Runtime containers never execute DDL. If an existing archive was initialized
-from the pre-v1.1 DDL (seven archive tables but no `schema_version` table),
-apply this once with an administrator account:
-
-```text
-sql/upgrades/v1_to_v2.sql
+```bash
+docker compose config --quiet
+docker compose up -d --build
+curl -sS http://127.0.0.1:18081/health/ready
+docker compose logs -f api worker
 ```
 
-After that, the runtime DML-only user only needs to read
-`schema_version`. Application startup checks that the database version equals
-the version required by the running code and refuses to start on mismatch.
+若提示 schema version 不匹配，说明不是 v6 空库，必须人工确认数据状态，
+不能修改 `schema_version` 数字来跳过检查。
 
+## 5. 旧版本数据库
 
-### v2 -> v3
-
-v1.4 adds the persistent `sync_sources` table. Existing schema-v2 databases
-must apply:
-
-```text
-sql/upgrades/v2_to_v3.sql
-```
-
-After the script succeeds, `schema_version.id=1` must contain `version=3`.
-For a database that predates schema versioning, apply `v1_to_v2.sql` first,
-then `v2_to_v3.sql`. Runtime containers never execute either script.
-
-
-### v3 -> v4
-
-v1.5 adds `work_sources` so one archived work can retain every synchronization
-source that discovered it.
-
-Existing schema-v3 databases must apply:
-
-```text
-sql/upgrades/v3_to_v4.sql
-```
-
-After the script succeeds, `schema_version.id=1` must contain `version=4`.
-For older installations, apply the upgrade scripts in order. Runtime containers
-never execute these scripts automatically.
-
-
-## v1.6 DDL 中文注释
-
-v1.6 没有新增业务表或字段，因此运行时要求仍然是 `schema_version=4`。
-最新版 `sql/pixiv_archive.sql` 已为每张表和每个字段增加中文 MySQL
-`COMMENT`，方便在 DataGrip、Navicat、IDEA Database 等工具中直接查看含义。
-
-新建空库直接执行最新版 DDL 即可。已有 v4 数据库即使没有这些 COMMENT，
-也不影响程序运行，因此不需要为了注释强制执行结构升级。
-
-### v4 -> v5（合集归档）
-
-已有 v4 库先备份数据库及 `/data/pixiv` 文件目录，确认没有重复的
-`(work_id,page_index,file_type)` 和 `(history_id,page_index,file_type)`
-文件记录，再手动运行 `sql/upgrades/v4_to_v5.sql`。新建空库无需升级，
-直接运行 `sql/pixiv_archive.sql`。运行时从不自动执行 DDL。
-
-> 注意：当前 `series.id` 同时用作漫画和小说的远端系列 ID，若二者数值
-> 恰好相同会冲突。程序会拒绝覆盖另一种类型的数据，后续可考虑
-> 将 `(type,id)` 迁移为复合主键（需要额外数据迁移）。
+本次未提供自动 v5→v6 数据迁移：因为尚未投入使用。如果今后发现
+确实存在旧版需要保留的数据，应单独编写有备份、回滚、校验的迁移。
+旧版升级脚本仅属历史参考，不能组合出 v6 结构。
