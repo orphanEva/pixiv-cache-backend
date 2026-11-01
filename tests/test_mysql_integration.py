@@ -121,7 +121,7 @@ async def test_series_and_tag_relationships_follow_updates(tmp_path: Path):
 @pytest.mark.asyncio(loop_scope="module")
 async def test_series_namespaces_and_composite_foreign_keys():
     """小说和漫画合集可以同号，且作品外键必须指向正确类型。"""
-    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.exc import IntegrityError, OperationalError
     shared = "series-overlap-30001"
     async with SessionLocal() as session:
         await session.execute(delete(Series).where(Series.id == shared))
@@ -145,7 +145,9 @@ async def test_series_namespaces_and_composite_foreign_keys():
         assert len(items) == 2
         # 外键允许相同 remote_id，但 CHECK 不允许把小说挂在漫画系列类型上。
         from sqlalchemy import text
-        with pytest.raises(IntegrityError):
+        # asyncmy maps MySQL 3819 (CHECK violation) to OperationalError,
+        # whereas other MySQL drivers may surface IntegrityError.
+        with pytest.raises((IntegrityError, OperationalError)):
             await session.execute(text(
                 "INSERT INTO works (id,type,status,series_type,series_id,title,author_id,"
                 "author_name,page_count,version_token) VALUES "
