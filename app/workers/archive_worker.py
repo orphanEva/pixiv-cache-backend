@@ -6,6 +6,8 @@ import os
 import signal
 import socket
 
+from sqlalchemy import update
+
 from app.clients.pixivpy_client import PixivPyClient
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -14,7 +16,7 @@ from app.core.errors import is_retryable_archive_error
 from app.core.redis_client import close_redis, get_redis
 from app.core.schema_version import ensure_schema_version
 from app.db.session import SessionLocal, engine
-from app.models.work import WorkType
+from app.models.work import SeriesMember, WorkType
 from app.services.archive_jobs import ArchiveJobQueue
 from app.services.cache_service import CacheService
 from app.services.work_sources import record_work_sources
@@ -108,6 +110,7 @@ class ArchiveWorker:
                 job_id,
                 result.model_dump(mode="json"),
             )
+            await self._update_series_member(job, "archived")
             logger.info("archive_job_succeeded", extra={"job_id": job_id})
         except Exception as exc:
             retryable = is_retryable_archive_error(exc)
@@ -133,6 +136,7 @@ class ArchiveWorker:
             else:
                 reason = "retry_exhausted" if retryable else "non_retryable"
                 await self.queue.mark_dead(job_id, exc, reason=reason)
+                await self._update_series_member(job, "failed", exc)
                 logger.error(
                     "archive_job_dead",
                     extra={
@@ -151,6 +155,29 @@ class ArchiveWorker:
             except asyncio.CancelledError:
                 pass
             await self.queue.ack(stream_id)
+
+    async def _update_series_member(self, job: dict, status: str, exc: Exception | None = None) -> None:
+        """归档终态回写到合集成员记录；不记录包含凭据的上游异常正文。"""
+        try:
+            async with SessionLocal() as session:
+                await session.execute(
+                    update(SeriesMember)
+                    .where(
+                        SeriesMember.work_id == str(job["pixiv_id"]),
+                        SeriesMember.work_type == (
+                            "novel" if job["kind"] == "novel" else "manga"
+                        ),
+                    )
+                    .values(
+                        status=status,
+                        last_error=exc.__class__.__name__ if exc else None,
+                    )
+                )
+                await session.commit()
+        except Exception:
+            logger.exception("series_member_status_write_failed", extra={
+                "pixiv_id": job["pixiv_id"], "job_id": job.get("job_id"),
+            })
 
     async def _touch_job_lease(self, stream_id: str) -> None:
         """长任务执行期间持续刷新 Stream pending lease。"""
