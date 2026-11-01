@@ -94,3 +94,14 @@ v1.6 没有新增业务表或字段，因此运行时要求仍然是 `schema_ver
 
 新建空库直接执行最新版 DDL 即可。已有 v4 数据库即使没有这些 COMMENT，
 也不影响程序运行，因此不需要为了注释强制执行结构升级。
+
+### v4 -> v5（合集归档）
+
+已有 v4 库先备份数据库及 `/data/pixiv` 文件目录，确认没有重复的
+`(work_id,page_index,file_type)` 和 `(history_id,page_index,file_type)`
+文件记录，再手动运行 `sql/upgrades/v4_to_v5.sql`。新建空库无需升级，
+直接运行 `sql/pixiv_archive.sql`。运行时从不自动执行 DDL。
+
+> 注意：当前 `series.id` 同时用作漫画和小说的远端系列 ID，若二者数值
+> 恰好相同会冲突。程序会拒绝覆盖另一种类型的数据，后续可考虑
+> 将 `(type,id)` 迁移为复合主键（需要额外数据迁移）。
