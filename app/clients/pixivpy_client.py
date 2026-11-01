@@ -190,7 +190,9 @@ class PixivPyClient(PixivClient):
 
     async def get_illust_snapshot(self, pixiv_id: int) -> RemoteSnapshot:
         result = await self._call(self.api.illust_detail, pixiv_id)
-        snapshot = build_illust_snapshot(getattr(result, "illust", None), pixiv_id)
+        data = to_dict(result)
+        illust = data.get("illust") if isinstance(data, dict) and "illust" in data else data
+        snapshot = build_illust_snapshot(illust, pixiv_id)
         if snapshot.work_type == WorkType.MANGA:
             try:
                 series = await self.web.get_illust_series(pixiv_id)
@@ -242,15 +244,15 @@ class PixivPyClient(PixivClient):
             self._call(self.api.novel_detail, pixiv_id),
             self._call(self.api.novel_text, pixiv_id),
         )
-        return build_novel_snapshot(
-            getattr(detail_result, "novel", None), text_result, pixiv_id
-        )
+        detail = to_dict(detail_result)
+        novel = detail.get("novel") if isinstance(detail, dict) and "novel" in detail else detail
+        return build_novel_snapshot(novel, text_result, pixiv_id)
 
     async def detect_series(self, kind: WorkType, pixiv_id: int) -> tuple[str, int] | None:
         """按作品 ID 检测所属系列，无法检测时返回 None。"""
         if kind == WorkType.NOVEL:
             payload = to_dict(await self._call(self.api.novel_detail, pixiv_id))
-            detail = payload.get("novel", {}) if isinstance(payload, dict) else {}
+            detail = payload.get("novel", payload) if isinstance(payload, dict) else {}
             series = detail.get("series") or {}
             sid = series.get("id") if isinstance(series, dict) else None
             return ("novel", int(sid)) if sid else None
