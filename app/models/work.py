@@ -133,7 +133,7 @@ class PixivWork(Base):
         Index("idx_author_id", "author_id"),
         Index("idx_remote_update_at", "remote_update_at"),
         Index("idx_series_lookup", "series_type", "series_id", "series_order"),
-        ForeignKeyConstraint(["series_type", "series_id"], ["series.type", "series.id"], ondelete="SET NULL", name="fk_works_series"),
+        ForeignKeyConstraint(["series_type", "series_id"], ["series.type", "series.id"], ondelete="RESTRICT", name="fk_works_series"),
         CheckConstraint("(series_id IS NULL AND series_type IS NULL) OR (series_id IS NOT NULL AND series_type IS NOT NULL)", name="chk_work_series_pair"),
         CheckConstraint("series_type IS NULL OR (series_type = 'novel' AND type = 'novel') OR (series_type = 'manga' AND type = 'manga')", name="chk_work_series_kind"),
     )
