@@ -13,7 +13,7 @@ CREATE TABLE schema_version (
   CONSTRAINT chk_schema_version_singleton CHECK (id = 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='数据库结构版本元数据';
 
-INSERT INTO schema_version (id, version) VALUES (1, 5);
+INSERT INTO schema_version (id, version) VALUES (1, 6);
 
 CREATE TABLE series (
   id VARCHAR(32) NOT NULL COMMENT 'Pixiv 系列 ID',
@@ -26,9 +26,8 @@ CREATE TABLE series (
   is_completed TINYINT(1) NOT NULL DEFAULT 0 COMMENT '系列是否已完结：0 否，1 是',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '本地首次创建时间',
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '本地最后更新时间',
-  PRIMARY KEY (id),
-  KEY idx_series_author (author_id),
-  KEY idx_series_type (type)
+  PRIMARY KEY (type, id),
+  KEY idx_series_author (author_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Pixiv 小说或漫画系列信息';
 
 CREATE TABLE tags (
@@ -47,6 +46,7 @@ CREATE TABLE works (
   status_reason VARCHAR(1000) COMMENT '状态异常或不可访问原因',
   x_restrict TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Pixiv 内容限制等级',
   is_ai TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否标记为 AI 生成作品：0 否，1 是',
+  series_type ENUM('novel','manga') COMMENT '所属合集类型，与系列 ID 共同构成外键',
   series_id VARCHAR(32) COMMENT '所属 Pixiv 系列 ID',
   series_order INT UNSIGNED COMMENT '作品在系列中的顺序',
   title VARCHAR(255) NOT NULL COMMENT '当前作品标题',
@@ -67,8 +67,10 @@ CREATE TABLE works (
   KEY idx_type_status (type,status),
   KEY idx_author_id (author_id),
   KEY idx_remote_update_at (remote_update_at),
-  KEY idx_series_lookup (series_id, series_order),
-  CONSTRAINT fk_works_series FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE SET NULL
+  KEY idx_series_lookup (series_type,series_id,series_order),
+  CONSTRAINT fk_works_series FOREIGN KEY (series_type,series_id) REFERENCES series(type,id) ON DELETE SET NULL,
+  CONSTRAINT chk_work_series_pair CHECK ((series_id IS NULL AND series_type IS NULL) OR (series_id IS NOT NULL AND series_type IS NOT NULL)),
+  CONSTRAINT chk_work_series_kind CHECK (series_type IS NULL OR (series_type='novel' AND type='novel') OR (series_type='manga' AND type='manga'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作品当前状态与当前版本元数据';
 
 CREATE TABLE work_history (
@@ -164,16 +166,16 @@ CREATE TABLE work_sources (
 
 -- 按系列跟踪所有已发现的作品，包括尚未成功归档的成员。
 CREATE TABLE series_members (
-  series_id VARCHAR(32) NOT NULL COMMENT '系列 ID，关联 series.id',
+  series_type ENUM('novel','manga') NOT NULL COMMENT '合集类型，与系列 ID 共同组成成员身份',
+  series_id VARCHAR(32) NOT NULL COMMENT '系列 ID，关联 series(type,id)',
   work_id VARCHAR(32) NOT NULL COMMENT '系列作品 Pixiv ID，可先于归档作品记录存在',
-  work_type ENUM('novel','manga') NOT NULL COMMENT '成员作品类别',
   series_order INT UNSIGNED COMMENT '系列作品序号',
   status ENUM('discovered','queued','archived','failed') NOT NULL DEFAULT 'discovered' COMMENT '发现、排队、归档成功或最终失败',
   last_error VARCHAR(1000) COMMENT '最后一次终态错误的安全摘要',
   discovered_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次发现时间',
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '成员状态最后更新时间',
-  PRIMARY KEY (series_id,work_id),
-  KEY idx_series_members_status (series_id,status),
+  PRIMARY KEY (series_type,series_id,work_id),
+  KEY idx_series_members_status (series_type,series_id,status),
   KEY idx_series_members_work (work_id),
-  CONSTRAINT fk_series_members_series FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
+  CONSTRAINT fk_series_member_parent FOREIGN KEY (series_type,series_id) REFERENCES series(type,id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='系列作品发现、排队和归档进度';
