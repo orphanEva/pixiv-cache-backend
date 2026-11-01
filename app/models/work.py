@@ -6,7 +6,7 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 from sqlalchemy import (
-    BigInteger, Boolean, DateTime, Enum, ForeignKey, Index, Integer, JSON,
+    BigInteger, Boolean, DateTime, Enum, ForeignKey, ForeignKeyConstraint, CheckConstraint, Index, Integer, JSON,
     String, Text, UniqueConstraint, text
 )
 from sqlalchemy.dialects.mysql import MEDIUMTEXT, INTEGER as MYSQL_INTEGER, BIGINT as MYSQL_BIGINT
@@ -59,7 +59,7 @@ class SchemaVersion(Base):
 class Series(Base):
     __tablename__ = "series"
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    type: Mapped[str] = mapped_column(Enum("novel", "manga"), nullable=False)
+    type: Mapped[str] = mapped_column(Enum("novel", "manga"), primary_key=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     caption: Mapped[str | None] = mapped_column(Text)
     author_id: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -68,22 +68,29 @@ class Series(Base):
     is_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
-    __table_args__ = (Index("idx_series_author", "author_id"), Index("idx_series_type", "type"))
+    __table_args__ = (Index("idx_series_author", "author_id"),)
 
 
 
 class SeriesMember(Base):
-    """系列发现成员：未下载成功的作品同样可以追踪。"""
+    """发现后即可持久化的系列成员；以(系列类型、系列ID、作品ID)唯一识别。"""
     __tablename__ = "series_members"
-    series_id: Mapped[str] = mapped_column(String(32), ForeignKey("series.id", ondelete="CASCADE"), primary_key=True)
+    series_type: Mapped[str] = mapped_column(Enum("novel", "manga"), primary_key=True)
+    series_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     work_id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    work_type: Mapped[str] = mapped_column(Enum("novel", "manga"), nullable=False)
     series_order: Mapped[int | None] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(Enum("discovered", "queued", "archived", "failed"), nullable=False, default="discovered")
+    status: Mapped[str] = mapped_column(
+        Enum("discovered", "queued", "archived", "failed"),
+        nullable=False, default="discovered",
+    )
     last_error: Mapped[str | None] = mapped_column(String(1000))
     discovered_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
-    __table_args__ = (Index("idx_series_members_status", "series_id", "status"), Index("idx_series_members_work", "work_id"),)
+    __table_args__ = (
+        ForeignKeyConstraint(["series_type", "series_id"], ["series.type", "series.id"], ondelete="CASCADE", name="fk_series_member_parent"),
+        Index("idx_series_members_status", "series_type", "series_id", "status"),
+        Index("idx_series_members_work", "work_id"),
+    )
 
 
 class Tag(Base):
@@ -102,7 +109,8 @@ class PixivWork(Base):
     status_reason: Mapped[str | None] = mapped_column(String(1000))
     x_restrict: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_ai: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    series_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("series.id", ondelete="SET NULL"))
+    series_type: Mapped[str | None] = mapped_column(Enum("novel", "manga"), nullable=True)
+    series_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     series_order: Mapped[int | None] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     caption: Mapped[str | None] = mapped_column(Text)
@@ -124,7 +132,10 @@ class PixivWork(Base):
         Index("idx_type_status", "type", "status"),
         Index("idx_author_id", "author_id"),
         Index("idx_remote_update_at", "remote_update_at"),
-        Index("idx_series_lookup", "series_id", "series_order"),
+        Index("idx_series_lookup", "series_type", "series_id", "series_order"),
+        ForeignKeyConstraint(["series_type", "series_id"], ["series.type", "series.id"], ondelete="SET NULL", name="fk_works_series"),
+        CheckConstraint("(series_id IS NULL AND series_type IS NULL) OR (series_id IS NOT NULL AND series_type IS NOT NULL)", name="chk_work_series_pair"),
+        CheckConstraint("series_type IS NULL OR (series_type = 'novel' AND type = 'novel') OR (series_type = 'manga' AND type = 'manga')", name="chk_work_series_kind"),
     )
 
     @property
