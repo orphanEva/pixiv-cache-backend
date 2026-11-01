@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import logging
 import uuid
+import time
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -46,16 +47,27 @@ app = FastAPI(title=settings.app_name, version="1.6.0", lifespan=lifespan)
 async def request_context(request: Request, call_next):
     request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
     token = request_id_ctx.set(request_id)
+    started = time.monotonic()
+    code = 500
     try:
         if request.url.path not in ("/health/live", "/health/ready"):
             if len(settings.api_key) < 32:
+                code = 503
                 return JSONResponse({"detail": "API_KEY is not configured"}, status_code=503, headers={"x-request-id": request_id})
             if not authorized(settings.api_key, request.headers.get("x-api-key")):
+                code = 401
                 return JSONResponse({"detail": "Invalid API key"}, status_code=401, headers={"x-request-id": request_id})
         response = await call_next(request)
+        code = response.status_code
         response.headers["x-request-id"] = request_id
         return response
     finally:
+        logger.info("http_request", extra={
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": code,
+            "duration_ms": round((time.monotonic() - started) * 1000, 2),
+        })
         request_id_ctx.reset(token)
 
 
