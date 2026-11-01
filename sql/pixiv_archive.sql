@@ -68,7 +68,7 @@ CREATE TABLE works (
   KEY idx_author_id (author_id),
   KEY idx_remote_update_at (remote_update_at),
   KEY idx_series_lookup (series_type,series_id,series_order),
-  CONSTRAINT fk_works_series FOREIGN KEY (series_type,series_id) REFERENCES series(type,id) ON DELETE SET NULL,
+  CONSTRAINT fk_works_series FOREIGN KEY (series_type,series_id) REFERENCES series(type,id) ON DELETE RESTRICT,
   CONSTRAINT chk_work_series_pair CHECK ((series_id IS NULL AND series_type IS NULL) OR (series_id IS NOT NULL AND series_type IS NOT NULL)),
   CONSTRAINT chk_work_series_kind CHECK (series_type IS NULL OR (series_type='novel' AND type='novel') OR (series_type='manga' AND type='manga'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作品当前状态与当前版本元数据';
