@@ -69,6 +69,7 @@ class LibraryService:
         statuses: list[WorkStatus] | None = None,
         author_id: str | None = None,
         series_id: str | None = None,
+        series_type: str | None = None,
         tags: list[str] | None = None,
         tag_mode: str = "all",
         source_id: int | None = None,
@@ -102,6 +103,8 @@ class LibraryService:
             conditions.append(PixivWork.author_id == author_id)
         if series_id:
             conditions.append(PixivWork.series_id == series_id)
+        if series_type:
+            conditions.append(PixivWork.series_type == series_type)
         if is_ai is not None:
             conditions.append(PixivWork.is_ai.is_(is_ai))
         if x_restrict is not None:
@@ -592,7 +595,10 @@ class LibraryService:
                 Series,
                 work_count.label("archived_works"),
             )
-            .outerjoin(PixivWork, PixivWork.series_id == Series.id)
+            .outerjoin(PixivWork, (
+                (PixivWork.series_id == Series.id)
+                & (PixivWork.series_type == Series.type)
+            ))
             .where(*conditions)
             .group_by(
                 Series.id,
@@ -635,14 +641,15 @@ class LibraryService:
             pagination=self._pagination(page, page_size, total),
         )
 
-    async def get_series(self, series_id: str) -> SeriesSummary | None:
-        series = await self.session.get(Series, series_id)
+    async def get_series(self, series_type: str, series_id: str) -> SeriesSummary | None:
+        series = await self.session.get(Series, {"type": series_type, "id": series_id})
         if series is None:
             return None
         count = (
             await self.session.execute(
                 select(func.count(PixivWork.id)).where(
-                    PixivWork.series_id == series_id
+                    PixivWork.series_id == series_id,
+                    PixivWork.series_type == series_type,
                 )
             )
         ).scalar_one()
@@ -836,6 +843,7 @@ class LibraryService:
             x_restrict=work.x_restrict,
             is_ai=work.is_ai,
             series_id=work.series_id,
+            series_type=work.series_type,
             series_order=work.series_order,
             remote_created_at=work.remote_created_at,
             remote_updated_at=work.remote_updated_at,

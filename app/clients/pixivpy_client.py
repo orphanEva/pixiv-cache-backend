@@ -6,7 +6,6 @@ from typing import Any, NoReturn
 
 from pixivpy3 import AppPixivAPI
 
-from app.auth.pixiv_credentials import AutoAuthError, PixivCredentialManager
 from app.clients.base import PixivClient
 from app.clients.pixiv_mapper import (
     apply_ugoira_metadata,
@@ -37,9 +36,8 @@ class PixivPyClient(PixivClient):
     def __init__(self) -> None:
         self.settings = get_settings()
         self.api = AppPixivAPI()
-        self.credentials = PixivCredentialManager()
-        self.refresh_token = self.credentials.current_refresh_token()
-        self.web = PixivWebClient(cookie=self.credentials.current_cookie())
+        self.refresh_token = self.settings.pixiv_refresh_token.strip()
+        self.web = PixivWebClient(cookie=self.settings.pixiv_cookie)
         self._auth_lock = asyncio.Lock()
         self._api_lock = asyncio.Lock()
         self._next_auth_at = 0.0
@@ -57,32 +55,12 @@ class PixivPyClient(PixivClient):
                 return
 
             if not self.refresh_token:
-                try:
-                    self.refresh_token = await self.credentials.ensure_refresh_token()
-                except AutoAuthError as exc:
-                    raise PixivAuthError(
-                        f"Pixiv App authentication unavailable: {exc.status}"
-                    ) from None
-
+                raise PixivAuthError("Pixiv App authentication unavailable: configure PIXIV_REFRESH_TOKEN")
             try:
                 await self._invoke_api(self.api.auth, refresh_token=self.refresh_token)
             except Exception:
-                if not self.settings.pixiv_auto_auth:
-                    raise PixivAuthError("Pixiv App authentication failed") from None
-                try:
-                    self.refresh_token = await self.credentials.recover_refresh_token()
-                    await self._invoke_api(
-                        self.api.auth, refresh_token=self.refresh_token
-                    )
-                except Exception as exc:
-                    status = (
-                        exc.status
-                        if isinstance(exc, AutoAuthError)
-                        else "authentication_failed"
-                    )
-                    raise PixivAuthError(
-                        f"Pixiv App automatic authentication failed: {status}"
-                    ) from None
+                # Never expose upstream auth errors, which can contain secrets.
+                raise PixivAuthError("Pixiv App authentication failed; update PIXIV_REFRESH_TOKEN") from None
 
             self._next_auth_at = time.monotonic() + 45 * 60
 
@@ -212,7 +190,19 @@ class PixivPyClient(PixivClient):
 
     async def get_illust_snapshot(self, pixiv_id: int) -> RemoteSnapshot:
         result = await self._call(self.api.illust_detail, pixiv_id)
-        snapshot = build_illust_snapshot(getattr(result, "illust", None), pixiv_id)
+        data = to_dict(result)
+        illust = data.get("illust") if isinstance(data, dict) and "illust" in data else data
+        snapshot = build_illust_snapshot(illust, pixiv_id)
+        if snapshot.work_type == WorkType.MANGA:
+            try:
+                series = await self.web.get_illust_series(pixiv_id)
+                if series:
+                    snapshot.series_id = series["id"]
+                    snapshot.series_order = series.get("order")
+                    snapshot.metadata["series"] = series
+            except Exception:
+                # Series detection must not prevent an otherwise valid single-work archive.
+                pass
         if snapshot.work_type == WorkType.UGOIRA:
             metadata = await self._call(self.api.ugoira_metadata, pixiv_id)
             if self.settings.ugoira_prefer_original:
@@ -223,80 +213,29 @@ class PixivPyClient(PixivClient):
         return snapshot
 
     async def _try_web_ugoira_metadata(self, pixiv_id: int) -> dict | None:
-        result = await self.web.get_ugoira_metadata(pixiv_id)
-        if result is not None or not self.settings.pixiv_auto_auth:
-            return result
-        try:
-            cookie = await self.credentials.recover_cookie()
-            self.web.set_cookie(cookie)
-        except AutoAuthError:
-            return None
         return await self.web.get_ugoira_metadata(pixiv_id)
 
     async def auth_status(self) -> dict:
-        state = self.credentials.state()
-        app_configured = bool(self.refresh_token)
-        app_authenticated = False
-        app_status = "not_configured"
-        if app_configured:
+        configured = bool(self.refresh_token)
+        authenticated = False
+        state = "not_configured"
+        if configured:
             try:
                 await self._ensure_auth(force=True)
-                app_authenticated = True
-                app_status = "ok"
+                authenticated = True
+                state = "ok"
             except PixivAuthError:
-                app_status = "authentication_failed"
-
-        self.web.set_cookie(self.credentials.current_cookie())
+                state = "authentication_failed"
         web = await self.web.check_auth()
         return {
-            "auto_auth": {
-                "enabled": state.auto_enabled,
-                "username_configured": state.username_configured,
-                "password_configured": state.password_configured,
-                "totp_configured": state.totp_configured,
-            },
-            "app_api": {
-                "configured": app_configured,
-                "authenticated": app_authenticated,
-                "status": app_status,
-                "cached_credential_available": state.refresh_token_available,
-            },
-            "web_cookie": {
-                "configured": web.configured,
-                "authenticated": web.authenticated,
-                "status": web.status,
-                "cached_credential_available": state.cookie_available,
-            },
+            "app_api": {"configured": configured, "authenticated": authenticated, "status": state},
+            "web_cookie": {"configured": web.configured, "authenticated": web.authenticated, "status": web.status},
         }
 
     async def recover_auth(self) -> dict:
-        app_status = "unchanged"
-        web_status = "unchanged"
-        try:
-            self.refresh_token = await self.credentials.recover_refresh_token()
-            self._next_auth_at = 0.0
-            await self._ensure_auth(force=True)
-            app_status = "ok"
-        except AutoAuthError as exc:
-            app_status = exc.status
-        except PixivAuthError:
-            app_status = "authentication_failed"
-
-        probe = await self.web.check_auth()
-        if probe.authenticated:
-            web_status = "ok"
-        else:
-            try:
-                cookie = await self.credentials.recover_cookie()
-                self.web.set_cookie(cookie)
-                probe = await self.web.check_auth()
-                web_status = "ok" if probe.authenticated else probe.status
-            except AutoAuthError as exc:
-                web_status = exc.status
-        return {
-            "app_api": {"status": app_status},
-            "web_cookie": {"status": web_status},
-        }
+        """Revalidate manually configured credentials, never attempt account login."""
+        self._next_auth_at = 0.0
+        return await self.auth_status()
 
     async def get_novel_snapshot(self, pixiv_id: int) -> RemoteSnapshot:
         # gather() is kept so callers do not depend on ordering, while _api_lock
@@ -305,9 +244,131 @@ class PixivPyClient(PixivClient):
             self._call(self.api.novel_detail, pixiv_id),
             self._call(self.api.novel_text, pixiv_id),
         )
-        return build_novel_snapshot(
-            getattr(detail_result, "novel", None), text_result, pixiv_id
-        )
+        detail = to_dict(detail_result)
+        novel = detail.get("novel") if isinstance(detail, dict) and "novel" in detail else detail
+        return build_novel_snapshot(novel, text_result, pixiv_id)
+
+    async def detect_series(self, kind: WorkType, pixiv_id: int) -> tuple[str, int] | None:
+        """按作品 ID 检测所属系列，无法检测时返回 None。"""
+        if kind == WorkType.NOVEL:
+            payload = to_dict(await self._call(self.api.novel_detail, pixiv_id))
+            detail = payload.get("novel", payload) if isinstance(payload, dict) else {}
+            series = detail.get("series") or {}
+            sid = series.get("id") if isinstance(series, dict) else None
+            return ("novel", int(sid)) if sid else None
+        if kind in (WorkType.MANGA, WorkType.ILLUST):
+            info = await self.web.get_illust_series(pixiv_id)
+            if info:
+                return ("manga", int(info["id"]))
+        return None
+
+    async def discover_novel_series(self, series_id: int) -> dict:
+        """遍历 PixivPy novel_series 的 last_order 游标，禁止静默截断。"""
+        from app.core.config import get_settings
+        settings = get_settings()
+        seen_ids: set[int] = set()
+        seen_cursor: set[str] = set()
+        works: list[dict] = []
+        detail: dict = {}
+        cursor: str | None = None
+        for page_no in range(settings.series_max_pages):
+            response = await self._call(self.api.novel_series, series_id, last_order=cursor)
+            data = to_dict(response)
+            if not isinstance(data, dict):
+                raise ValueError("Invalid novel series payload")
+            if not detail:
+                detail = data.get("novel_series_detail") or {}
+                if not isinstance(detail, dict):
+                    detail = {}
+            batch = data.get("novels") or []
+            if not isinstance(batch, list):
+                raise ValueError("Invalid novel series works list")
+            for value in batch:
+                item = to_dict(value)
+                if not isinstance(item, dict) or not item.get("id"):
+                    continue
+                wid = int(item["id"])
+                if wid not in seen_ids:
+                    seen_ids.add(wid)
+                    info = item.get("series") or {}
+                    works.append({"id": wid, "kind": "novel", "order": (
+                        info.get("order") if isinstance(info, dict) else None
+                    ) or len(works) + 1})
+                    if len(works) > settings.series_max_works:
+                        raise ValueError("Novel series exceeds SERIES_MAX_WORKS")
+            next_url = data.get("next_url")
+            if not next_url:
+                break
+            params = await self._invoke_api(self.api.parse_qs, next_url)
+            next_cursor = str((params or {}).get("last_order") or "")
+            if not next_cursor or next_cursor in seen_cursor:
+                raise ValueError("Novel series pagination cursor did not advance")
+            seen_cursor.add(next_cursor)
+            cursor = next_cursor
+        else:
+            raise ValueError("Novel series exceeds SERIES_MAX_PAGES")
+        user = to_dict(detail.get("user") or {})
+        if not isinstance(user, dict):
+            user = {}
+        return {
+            "series_id": series_id, "series_type": "novel",
+            "title": detail.get("title") or f"Novel series {series_id}",
+            "caption": detail.get("caption"),
+            "author_id": str(user.get("id") or detail.get("user_id") or "0"),
+            "author_name": user.get("name") or detail.get("user_name") or "",
+            "published_total": detail.get("content_count") or detail.get("total") or len(works),
+            "is_completed": bool(detail.get("is_completed", False)),
+            "works": works,
+        }
+
+    async def discover_manga_series(self, series_id: int) -> dict:
+        """遍历漫画 Web AJAX；页数据不可信时不返回不完整结果。"""
+        settings = get_settings()
+        seen: set[int] = set()
+        works: list[dict] = []
+        meta: dict = {}
+        for page_no in range(1, settings.series_max_pages + 1):
+            body = await self.web.get_manga_series_page(series_id, page_no)
+            if page_no == 1:
+                meta = body.get("series") or body.get("seriesInfo") or {}
+                if not isinstance(meta, dict):
+                    meta = {}
+            thumbnails = body.get("thumbnails") or {}
+            batch = thumbnails.get("illust") if isinstance(thumbnails, dict) else None
+            if batch is None:
+                batch = body.get("illusts") or body.get("works")
+            if not isinstance(batch, (list, dict)):
+                raise ValueError("Unsupported manga series response structure")
+            if isinstance(batch, dict):
+                batch = list(batch.values())
+            new_count = 0
+            for value in batch:
+                item = to_dict(value)
+                if not isinstance(item, dict) or not (item.get("id") or item.get("illustId")):
+                    continue
+                wid = int(item.get("id") or item["illustId"])
+                if wid in seen:
+                    continue
+                seen.add(wid)
+                new_count += 1
+                works.append({"id": wid, "kind": "manga", "order": len(works) + 1})
+                if len(works) > settings.series_max_works:
+                    raise ValueError("Manga series exceeds SERIES_MAX_WORKS")
+            page = body.get("page") or {}
+            if not new_count or (isinstance(page, dict) and page.get("isLastPage") is True):
+                break
+        else:
+            raise ValueError("Manga series exceeds SERIES_MAX_PAGES")
+        return {
+            "series_id": series_id, "series_type": "manga",
+            "title": meta.get("title") or body.get("title") or f"Manga series {series_id}",
+            "caption": meta.get("caption"),
+            "author_id": str(meta.get("userId") or meta.get("user_id") or "0"),
+            "author_name": meta.get("userName") or meta.get("user_name") or "",
+            "published_total": meta.get("total") or len(works),
+            "is_completed": bool(meta.get("isCompleted", False)),
+            "works": works,
+        }
 
     async def get_authenticated_user_id(self) -> int:
         await self._ensure_auth()

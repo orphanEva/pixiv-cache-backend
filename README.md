@@ -18,13 +18,14 @@ your old dump. Back up the original schema and media first. The old
 three-table `pixiv_cache` layout and the originally supplied seven-table
 dump are *different schemas* and need an explicit, reviewed data migration.
 
-Seven archive tables plus schema/synchronization metadata:
+Versioned archive and series/synchronization tables:
 
 - `schema_version`: manually applied database schema version (metadata only)
 - `sync_sources`: persistent author/bookmark synchronization subscriptions
 - `work_sources`: many-to-many attribution from archived works to sync sources
 - `works`: current work metadata, fingerprint, accessibility, current version
-- `series`: series metadata
+- `series`: typed series identity (composite primary key `type,id`) and metadata
+- `series_members`: composite series/work identity with discovery/queue/archive/failure status
 - `tags` and `work_tag_relation`: searchable current tags
 - `work_files`: pointers to files in the current version
 - `work_history`: **every** version, including the current one
@@ -71,7 +72,9 @@ All non-health routes require an `X-API-Key` header.
 - `GET /api/admin/cache/status`
 - `GET /api/admin/cache/{kind}/{id}`
 - `POST /api/admin/cache/{kind}/{id}/refresh` (queues a worker job)
-- `POST /api/jobs/archive/{kind}/{id}`
+- `POST /api/jobs/archive/{kind}/{id}?expand_series=true` (default: auto-discover series)
+- `POST /api/jobs/archive/series/{novel|manga}/{series_id}` (entire series)
+- `GET /api/jobs/series/{series_type}/{series_id}` (series member progress)
 - `GET /api/jobs/{job_id}`
 - `GET /api/jobs?status=dead`
 - `POST /api/jobs/{job_id}/retry`
@@ -94,7 +97,7 @@ All non-health routes require an `X-API-Key` header.
 - `GET /api/library/authors/{author_id}`
 - `GET /api/library/tags`
 - `GET /api/library/series`
-- `GET /api/library/series/{series_id}`
+- `GET /api/library/series/{series_type}/{series_id}`
 - `GET /api/library/stats`
 
 `refresh=true` checks upstream according to
@@ -177,60 +180,45 @@ token. Keep `.env` private. If future Pixiv Web POST operations are added,
 they must also implement Pixiv's CSRF-token flow; current Web usage is GET-only.
 
 
-## Automatic Pixiv authentication
+## Pixiv token-only authentication
 
-Manual `PIXIV_REFRESH_TOKEN` and `PIXIV_COOKIE` remain supported. To let
-the service maintain them automatically instead:
-
-```env
-PIXIV_AUTO_AUTH=true
-PIXIV_USERNAME=your_pixiv_login
-PIXIV_PASSWORD=your_pixiv_password
-# Optional, for unattended 2FA:
-PIXIV_TOTP_SECRET=BASE32_OR_OTPAUTH_URI
-```
-
-Derived credentials are cached under `/data/pixiv/auth` and survive container
-restarts through the existing `./data:/data/pixiv` volume. The cache contains
-only the derived refresh token and Cookie, not the username/password/TOTP
-secret. Cache files are written with restrictive permissions.
-
-Recovery flow:
-
-```text
-App API:
-cached/manual refresh token
-  -> Pixiv rejects it
-  -> gppt.refresh()
-  -> if refresh fails: gppt.login(username,password,TOTP)
-  -> save new refresh token
-
-Web:
-cached/manual Cookie
-  -> Pixiv Web rejects it / protected metadata unavailable
-  -> headless Chromium login
-  -> optional TOTP
-  -> save new Pixiv Cookie
-```
-
-Automatic browser login is deliberately rate-limited after failures. If Pixiv
-requires CAPTCHA or another human verification step the backend returns
-`interactive_required` instead of repeatedly attempting login.
-
-Check without triggering browser login:
+Account/password/TOTP login, GPPT and headless Chromium have been removed.
+Configure `PIXIV_REFRESH_TOKEN` for PixivPy; optionally configure `PIXIV_COOKIE`
+for Web AJAX, especially manga series. Both are supplied manually in `.env`.
+The server does not generate new credentials. See [auth guide](docs/PIXIV_AUTH.md).
 
 ```sh
-curl -H "X-API-Key: $API_KEY" \
-  http://127.0.0.1:18081/api/admin/pixiv/auth/status
+curl -H "X-API-Key: $API_KEY" http://127.0.0.1:18081/api/admin/pixiv/auth/status
 ```
 
-Explicitly ask the backend to recover both credentials:
+## Series archive and logs
+
+Discover a series automatically when downloading a single novel or manga:
 
 ```sh
 curl -X POST -H "X-API-Key: $API_KEY" \
-  http://127.0.0.1:18081/api/admin/pixiv/auth/refresh
+  "http://127.0.0.1:18081/api/jobs/archive/novel/123456?expand_series=true"
 ```
 
+Or pass a series ID directly (works if automatic detection is unavailable):
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "http://127.0.0.1:18081/api/jobs/archive/series/novel/12345"
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "http://127.0.0.1:18081/api/jobs/archive/series/manga/12345"
+curl -H "X-API-Key: $API_KEY" http://127.0.0.1:18081/api/jobs/series/novel/12345
+```
+
+The series and discovered members are persisted in MySQL first, and each member
+uses the existing Redis download queue. The worker marks members archived or failed.
+Web manga discovery relies on an undocumented Pixiv AJAX endpoint; if Pixiv changes its
+response, a series request fails instead of claiming a partial collection is complete.
+Single-item download remains available with `expand_series=false`.
+
+JSON logs include request IDs, durations, archive and series events; view them with
+`docker compose logs -f api worker`. Optional per-process rotating file logs can
+be enabled with `LOG_FILE` (do not share one log file between multiple processes).
 
 ## v1.1 stability controls
 
@@ -254,18 +242,12 @@ Use `verify_hash=true` for a full SHA-256 audit. The endpoint reports missing
 registered files, hash mismatches, orphan version directories, stale `.part`
 files, and paths outside the configured storage root. It never deletes files.
 
-### Manual schema versions
+### 数据库版本：v6 全新初始化
 
-New databases should always use the current `sql/pixiv_archive.sql`. Existing
-v1 archive databases must manually apply:
-
-```text
-sql/upgrades/v1_to_v2.sql
-```
-
-before starting v1.1. The application verifies `schema_version` on startup but
-does not execute schema changes itself.
-
+因为项目还没有投入使用，这次直接重构了系列表的主键和外键。
+**仅支持从 `sql/pixiv_archive.sql` 初始化全新空库；不要执行以前的 v1-v5 升级脚本来获得 v6。**
+运行时程序从不自动建表或迁移。详见
+[全新建库指南](docs/MANUAL_DATABASE_SETUP.md)。
 
 ## v1.2 archive worker
 
@@ -441,17 +423,9 @@ Incremental discovery is durable: source schedule/frontier state lives in
 MySQL, sync jobs live in a Redis Stream, and actual media archive jobs use the
 existing archive Redis Stream.
 
-### Schema v3
+### 历史版本结构说明
 
-New empty databases use the current `sql/pixiv_archive.sql` directly. Existing
-schema-v2 installations must manually apply:
-
-```text
-sql/upgrades/v2_to_v3.sql
-```
-
-Runtime containers still execute no DDL automatically.
-
+本节介绍旧版的同步源功能；当前运行版本使用 v6 全新建表，不应套用历史迁移脚本。
 
 ## v1.5 API-first library
 
@@ -516,17 +490,13 @@ Filter by source:
 GET /api/library/works?source_id=12
 ```
 
-### Schema v4
+### Schema v6（新库）
 
-New empty databases use the current `sql/pixiv_archive.sql`. Existing
-schema-v3 installations must manually apply:
-
-```text
-sql/upgrades/v3_to_v4.sql
-```
-
-Runtime containers still perform no automatic DDL.
-
+`series` 使用联合主键 `(type, id)`，
+`series_members` 使用 `(series_type, series_id, work_id)` 唯一键，
+`works` 使用联合外键 `(series_type, series_id)`，
+从数据库层隔离同号小说与漫画合集。
+只需执行 `sql/pixiv_archive.sql`，无需升级脚本。
 
 ## v1.6 archive reliability and operations
 
@@ -601,10 +571,8 @@ GET  /api/ops/jobs?status=dead
 POST /api/ops/jobs/{job_id}/replay
 ```
 
-### DDL comments
+### DDL 中文注释
 
-The canonical `sql/pixiv_archive.sql` now includes Chinese MySQL `COMMENT`
-metadata for every table and every column. This is documentation-only and does
-not change the functional schema version: v1.6 still requires **schema v4**.
-Existing schema-v4 databases do not need a migration merely for runtime
-compatibility; brand-new databases should use the latest canonical DDL.
+最新 `sql/pixiv_archive.sql` 已为每张表、每个字段提供中文 COMMENT，
+适合直接在 DataGrip、Navicat 或 IDEA Database 查看。
+当前程序要求 `schema_version=6`，且只支持重新初始化的空数据库。

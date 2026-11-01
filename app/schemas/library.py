@@ -56,6 +56,7 @@ class LibraryWorkSummary(BaseModel):
     x_restrict: int
     is_ai: bool
     series_id: str | None = None
+    series_type: str | None = None
     series_order: int | None = None
     remote_created_at: datetime | None = None
     remote_updated_at: datetime | None = None

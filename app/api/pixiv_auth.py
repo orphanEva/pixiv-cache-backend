@@ -1,4 +1,4 @@
-"""Private Pixiv authentication endpoints.
+"""Pixiv Token/Cookie validation endpoints.
 
 Global API-key middleware protects this router. No credential material is
 returned or logged.
@@ -18,5 +18,5 @@ async def pixiv_auth_status(client: PixivPyClient = Depends(get_client)):
 
 @router.post("/auth/refresh")
 async def pixiv_auth_refresh(client: PixivPyClient = Depends(get_client)):
-    """Explicitly recover/renew App token and Web Cookie when AUTO_AUTH is enabled."""
+    """Revalidate configured App token and Web Cookie without account login."""
     return await client.recover_auth()

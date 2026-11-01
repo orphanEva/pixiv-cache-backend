@@ -16,7 +16,7 @@ def test_library_openapi_contract_is_api_first_and_non_destructive():
         "/api/library/authors/{author_id}",
         "/api/library/tags",
         "/api/library/series",
-        "/api/library/series/{series_id}",
+        "/api/library/series/{series_type}/{series_id}",
         "/api/library/stats",
     }
     assert expected.issubset(paths)

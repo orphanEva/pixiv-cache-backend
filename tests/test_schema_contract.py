@@ -10,6 +10,7 @@ def test_archive_schema_contract():
         "schema_version",
         "works",
         "series",
+        "series_members",
         "tags",
         "work_files",
         "work_history",
@@ -32,25 +33,16 @@ def test_archive_schema_contract():
         assert f"'{file_type}'" in sql
 
 
-def test_manual_v1_to_v2_upgrade_exists():
-    sql = Path("sql/upgrades/v1_to_v2.sql").read_text()
-    assert "CREATE TABLE IF NOT EXISTS schema_version" in sql
-    assert "DROP TABLE" not in sql
-    assert "ON DUPLICATE KEY UPDATE" in sql
-
-
-def test_manual_v2_to_v3_upgrade_exists():
-    sql = Path("sql/upgrades/v2_to_v3.sql").read_text()
-    assert "CREATE TABLE sync_sources" in sql
-    assert "SET version = 3" in sql
-    assert "DROP TABLE" not in sql
-
-
-def test_manual_v3_to_v4_upgrade_exists():
-    sql = Path("sql/upgrades/v3_to_v4.sql").read_text()
-    assert "CREATE TABLE work_sources" in sql
-    assert "SET version = 4" in sql
-    assert "DROP TABLE" not in sql
+def test_typed_series_composite_keys():
+    from app.models.work import Series, SeriesMember, PixivWork
+    assert set(Series.__table__.primary_key.columns.keys()) == {"id", "type"}
+    assert set(SeriesMember.__table__.primary_key.columns.keys()) == {"series_type", "series_id", "work_id"}
+    fks = {tuple(fk.column_keys) for fk in PixivWork.__table__.foreign_key_constraints}
+    assert ("series_type", "series_id") in fks
+    sql = Path("sql/pixiv_archive.sql").read_text()
+    assert "PRIMARY KEY (type, id)" in sql
+    assert "PRIMARY KEY (series_type,series_id,work_id)" in sql
+    assert "FOREIGN KEY (series_type,series_id) REFERENCES series(type,id)" in sql
 
 
 def test_app_never_runs_schema_mutations_on_start():

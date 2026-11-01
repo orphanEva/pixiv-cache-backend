@@ -94,11 +94,11 @@ async def test_series_and_tag_relationships_follow_updates(tmp_path: Path):
     try:
         async with SessionLocal() as session:
             await session.execute(delete(PixivWork).where(PixivWork.id == str(pixiv_id)))
-            await session.execute(delete(Series).where(Series.id == "series-test-135"))
+            await session.execute(delete(Series).where(Series.id == "series-test-135", Series.type == "novel"))
             await session.commit()
             service = CacheService(session, client, redis_client=get_redis())
             await service.get_novel(pixiv_id)
-            assert await session.get(Series, "series-test-135") is not None
+            assert await session.get(Series, {"type": "novel", "id": "series-test-135"}) is not None
             assert (await session.execute(
                 select(func.count()).select_from(WorkTagRelation)
                 .where(WorkTagRelation.work_id == str(pixiv_id))
@@ -116,6 +116,47 @@ async def test_series_and_tag_relationships_follow_updates(tmp_path: Path):
     finally:
         settings.storage_root, settings.remote_check_ttl_seconds = old_root, old_ttl
         await close_redis()
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_series_namespaces_and_composite_foreign_keys():
+    """小说和漫画合集可以同号，且作品外键必须指向正确类型。"""
+    from sqlalchemy.exc import IntegrityError, OperationalError
+    shared = "series-overlap-30001"
+    async with SessionLocal() as session:
+        await session.execute(delete(Series).where(Series.id == shared))
+        await session.commit()
+        session.add_all([
+            Series(id=shared, type="novel", title="小说合集", author_id="1", author_name="A"),
+            Series(id=shared, type="manga", title="漫画合集", author_id="2", author_name="B"),
+        ])
+        await session.commit()
+        assert await session.get(Series, {"type": "novel", "id": shared}) is not None
+        assert await session.get(Series, {"type": "manga", "id": shared}) is not None
+        from app.models.work import SeriesMember
+        session.add_all([
+            SeriesMember(series_type="novel", series_id=shared, work_id="101", status="discovered"),
+            SeriesMember(series_type="manga", series_id=shared, work_id="101", status="discovered"),
+        ])
+        await session.commit()
+        items = (await session.execute(
+            select(SeriesMember).where(SeriesMember.series_id == shared)
+        )).scalars().all()
+        assert len(items) == 2
+        # 外键允许相同 remote_id，但 CHECK 不允许把小说挂在漫画系列类型上。
+        from sqlalchemy import text
+        # asyncmy maps MySQL 3819 (CHECK violation) to OperationalError,
+        # whereas other MySQL drivers may surface IntegrityError.
+        with pytest.raises((IntegrityError, OperationalError)):
+            await session.execute(text(
+                "INSERT INTO works (id,type,status,series_type,series_id,title,author_id,"
+                "author_name,page_count,version_token) VALUES "
+                "('9876500001','novel','active','manga',:sid,'bad','1','A',1,:token)"
+            ), {"sid": shared, "token": "a" * 64})
+            await session.commit()
+        await session.rollback()
+        await session.execute(delete(Series).where(Series.id == shared))
+        await session.commit()
 
 
 @pytest.mark.asyncio(loop_scope="module")

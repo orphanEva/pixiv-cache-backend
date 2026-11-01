@@ -20,7 +20,7 @@ from app.core.errors import (
     PixivRestrictedError, PixivUnavailableError,
 )
 from app.models.work import (
-    CurrentFile, PixivAsset, PixivVersion, PixivWork, Series,
+    CurrentFile, PixivAsset, PixivVersion, PixivWork, Series, SeriesMember,
     Tag, WorkStatus, WorkTagRelation, WorkType,
 )
 from app.schemas.pixiv import (
@@ -137,6 +137,23 @@ class CacheService:
                 raise
 
             lock.ensure_alive()
+            if snapshot.work_type == WorkType.MANGA and not snapshot.series_id:
+                # 已通过系列接口发现的成员不依赖漫画作品详情页二次成功识别。
+                relation = (
+                    await self.session.execute(
+                        select(SeriesMember).where(
+                            SeriesMember.work_id == str(pixiv_id),
+                            SeriesMember.series_type == "manga",
+                        ).limit(1)
+                    )
+                ).scalar_one_or_none()
+                if relation is not None:
+                    snapshot.series_id = relation.series_id
+                    snapshot.series_order = relation.series_order
+                    snapshot.metadata["series"] = {
+                        "id": relation.series_id,
+                        "order": relation.series_order,
+                    }
             token_unchanged = bool(
                 work and work.version_token == snapshot.version_token
             )
@@ -172,6 +189,14 @@ class CacheService:
                     raise
 
             if token_unchanged and binary_unchanged:
+                # 系列关系可能调整但作品内容指纹不变；不能因此漏掉关联更新。
+                await self._sync_series(snapshot)
+                if snapshot.series_id is not None or snapshot.work_type == WorkType.NOVEL:
+                    work.series_id = snapshot.series_id
+                    work.series_type = (
+                        "novel" if snapshot.work_type == WorkType.NOVEL else "manga"
+                    ) if snapshot.series_id else None
+                    work.series_order = snapshot.series_order
                 work.status = WorkStatus.ACTIVE
                 work.status_reason = None
                 work.last_checked_at = now_utc()
@@ -215,6 +240,9 @@ class CacheService:
                 work.x_restrict = snapshot.x_restrict
                 work.is_ai = snapshot.is_ai
                 work.series_id = snapshot.series_id
+                work.series_type = (
+                    "novel" if snapshot.work_type == WorkType.NOVEL else "manga"
+                ) if snapshot.series_id else None
                 work.series_order = snapshot.series_order
                 work.remote_created_at = utc_naive(snapshot.created_at)
                 work.remote_updated_at = utc_naive(snapshot.updated_at)
@@ -277,17 +305,28 @@ class CacheService:
         if not isinstance(series_info, dict):
             series_info = {}
         series_type = "novel" if snapshot.work_type == WorkType.NOVEL else "manga"
-        series = await self.session.get(Series, snapshot.series_id)
+        series = await self.session.get(Series, {"type": series_type, "id": snapshot.series_id})
         if series is None:
-            self.session.add(Series(
+            series = Series(
                 id=snapshot.series_id, type=series_type,
                 title=(series_info.get("title") or snapshot.title)[:255],
                 author_id=str(snapshot.author_id or 0),
                 author_name=(snapshot.author_name or "")[:128],
-            ))
-            # Flush the parent explicitly: SQLAlchemy cannot always order
-            # unrelated ORM objects solely from a populated FK string.
+            )
+            self.session.add(series)
             await self.session.flush()
+        else:
+            # Existing series metadata can change without adding a new work.
+            if series_info.get("title"):
+                series.title = str(series_info["title"])[:255]
+            if series_info.get("caption") is not None:
+                series.caption = series_info["caption"]
+            if snapshot.author_id:
+                series.author_id = str(snapshot.author_id)
+            if snapshot.author_name:
+                series.author_name = snapshot.author_name[:128]
+            if series_info.get("published_total") is not None:
+                series.published_total = int(series_info["published_total"])
 
     async def _sync_tags(self, work_id: str, tags: list[dict]) -> None:
         await self.session.execute(delete(WorkTagRelation).where(WorkTagRelation.work_id == work_id))
