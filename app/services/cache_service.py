@@ -172,6 +172,10 @@ class CacheService:
                     raise
 
             if token_unchanged and binary_unchanged:
+                # 系列关系可能调整但作品内容指纹不变；不能因此漏掉关联更新。
+                await self._sync_series(snapshot)
+                work.series_id = snapshot.series_id
+                work.series_order = snapshot.series_order
                 work.status = WorkStatus.ACTIVE
                 work.status_reason = None
                 work.last_checked_at = now_utc()
@@ -279,15 +283,28 @@ class CacheService:
         series_type = "novel" if snapshot.work_type == WorkType.NOVEL else "manga"
         series = await self.session.get(Series, snapshot.series_id)
         if series is None:
-            self.session.add(Series(
+            series = Series(
                 id=snapshot.series_id, type=series_type,
                 title=(series_info.get("title") or snapshot.title)[:255],
                 author_id=str(snapshot.author_id or 0),
                 author_name=(snapshot.author_name or "")[:128],
-            ))
-            # Flush the parent explicitly: SQLAlchemy cannot always order
-            # unrelated ORM objects solely from a populated FK string.
+            )
+            self.session.add(series)
             await self.session.flush()
+        elif series.type != series_type:
+            raise ValueError("Pixiv series id collision across novel/manga")
+        else:
+            # Existing series metadata can change without adding a new work.
+            if series_info.get("title"):
+                series.title = str(series_info["title"])[:255]
+            if series_info.get("caption") is not None:
+                series.caption = series_info["caption"]
+            if snapshot.author_id:
+                series.author_id = str(snapshot.author_id)
+            if snapshot.author_name:
+                series.author_name = snapshot.author_name[:128]
+            if series_info.get("published_total") is not None:
+                series.published_total = int(series_info["published_total"])
 
     async def _sync_tags(self, work_id: str, tags: list[dict]) -> None:
         await self.session.execute(delete(WorkTagRelation).where(WorkTagRelation.work_id == work_id))
