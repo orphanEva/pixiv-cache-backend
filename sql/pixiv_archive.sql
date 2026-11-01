@@ -13,7 +13,7 @@ CREATE TABLE schema_version (
   CONSTRAINT chk_schema_version_singleton CHECK (id = 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='数据库结构版本元数据';
 
-INSERT INTO schema_version (id, version) VALUES (1, 4);
+INSERT INTO schema_version (id, version) VALUES (1, 5);
 
 CREATE TABLE series (
   id VARCHAR(32) NOT NULL COMMENT 'Pixiv 系列 ID',
@@ -100,6 +100,7 @@ CREATE TABLE work_files (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '当前文件记录创建时间',
   PRIMARY KEY (id),
   KEY idx_work_id (work_id),
+  UNIQUE KEY uk_work_file_identity (work_id, page_index, file_type),
   CONSTRAINT fk_wf_work_id FOREIGN KEY (work_id) REFERENCES works(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作品当前版本文件索引';
 
@@ -115,6 +116,7 @@ CREATE TABLE work_history_files (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '历史文件记录创建时间',
   PRIMARY KEY (id),
   KEY idx_history_id (history_id),
+  UNIQUE KEY uk_history_file_identity (history_id, page_index, file_type),
   CONSTRAINT fk_whf_history_id FOREIGN KEY (history_id) REFERENCES work_history(history_id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作品历史版本文件索引';
 
@@ -159,3 +161,19 @@ CREATE TABLE work_sources (
   CONSTRAINT fk_ws_work_id FOREIGN KEY (work_id) REFERENCES works(id) ON DELETE CASCADE,
   CONSTRAINT fk_ws_source_id FOREIGN KEY (source_id) REFERENCES sync_sources(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='归档作品与同步来源的多对多追踪关系';
+
+-- 按系列跟踪所有已发现的作品，包括尚未成功归档的成员。
+CREATE TABLE series_members (
+  series_id VARCHAR(32) NOT NULL COMMENT '系列 ID，关联 series.id',
+  work_id VARCHAR(32) NOT NULL COMMENT '系列作品 Pixiv ID，可先于归档作品记录存在',
+  work_type ENUM('novel','manga') NOT NULL COMMENT '成员作品类别',
+  series_order INT UNSIGNED COMMENT '系列作品序号',
+  status ENUM('discovered','queued','archived','failed') NOT NULL DEFAULT 'discovered' COMMENT '发现、排队、归档成功或最终失败',
+  last_error VARCHAR(1000) COMMENT '最后一次终态错误的安全摘要',
+  discovered_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次发现时间',
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '成员状态最后更新时间',
+  PRIMARY KEY (series_id,work_id),
+  KEY idx_series_members_status (series_id,status),
+  KEY idx_series_members_work (work_id),
+  CONSTRAINT fk_series_members_series FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='系列作品发现、排队和归档进度';
