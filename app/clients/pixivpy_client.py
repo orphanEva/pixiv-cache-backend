@@ -6,7 +6,6 @@ from typing import Any, NoReturn
 
 from pixivpy3 import AppPixivAPI
 
-from app.auth.pixiv_credentials import AutoAuthError, PixivCredentialManager
 from app.clients.base import PixivClient
 from app.clients.pixiv_mapper import (
     apply_ugoira_metadata,
@@ -37,9 +36,8 @@ class PixivPyClient(PixivClient):
     def __init__(self) -> None:
         self.settings = get_settings()
         self.api = AppPixivAPI()
-        self.credentials = PixivCredentialManager()
-        self.refresh_token = self.credentials.current_refresh_token()
-        self.web = PixivWebClient(cookie=self.credentials.current_cookie())
+        self.refresh_token = self.settings.pixiv_refresh_token.strip()
+        self.web = PixivWebClient(cookie=self.settings.pixiv_cookie)
         self._auth_lock = asyncio.Lock()
         self._api_lock = asyncio.Lock()
         self._next_auth_at = 0.0
@@ -57,32 +55,12 @@ class PixivPyClient(PixivClient):
                 return
 
             if not self.refresh_token:
-                try:
-                    self.refresh_token = await self.credentials.ensure_refresh_token()
-                except AutoAuthError as exc:
-                    raise PixivAuthError(
-                        f"Pixiv App authentication unavailable: {exc.status}"
-                    ) from None
-
+                raise PixivAuthError("Pixiv App authentication unavailable: configure PIXIV_REFRESH_TOKEN")
             try:
                 await self._invoke_api(self.api.auth, refresh_token=self.refresh_token)
             except Exception:
-                if not self.settings.pixiv_auto_auth:
-                    raise PixivAuthError("Pixiv App authentication failed") from None
-                try:
-                    self.refresh_token = await self.credentials.recover_refresh_token()
-                    await self._invoke_api(
-                        self.api.auth, refresh_token=self.refresh_token
-                    )
-                except Exception as exc:
-                    status = (
-                        exc.status
-                        if isinstance(exc, AutoAuthError)
-                        else "authentication_failed"
-                    )
-                    raise PixivAuthError(
-                        f"Pixiv App automatic authentication failed: {status}"
-                    ) from None
+                # Never expose upstream auth errors, which can contain secrets.
+                raise PixivAuthError("Pixiv App authentication failed; update PIXIV_REFRESH_TOKEN") from None
 
             self._next_auth_at = time.monotonic() + 45 * 60
 
@@ -223,80 +201,29 @@ class PixivPyClient(PixivClient):
         return snapshot
 
     async def _try_web_ugoira_metadata(self, pixiv_id: int) -> dict | None:
-        result = await self.web.get_ugoira_metadata(pixiv_id)
-        if result is not None or not self.settings.pixiv_auto_auth:
-            return result
-        try:
-            cookie = await self.credentials.recover_cookie()
-            self.web.set_cookie(cookie)
-        except AutoAuthError:
-            return None
         return await self.web.get_ugoira_metadata(pixiv_id)
 
     async def auth_status(self) -> dict:
-        state = self.credentials.state()
-        app_configured = bool(self.refresh_token)
-        app_authenticated = False
-        app_status = "not_configured"
-        if app_configured:
+        configured = bool(self.refresh_token)
+        authenticated = False
+        state = "not_configured"
+        if configured:
             try:
                 await self._ensure_auth(force=True)
-                app_authenticated = True
-                app_status = "ok"
+                authenticated = True
+                state = "ok"
             except PixivAuthError:
-                app_status = "authentication_failed"
-
-        self.web.set_cookie(self.credentials.current_cookie())
+                state = "authentication_failed"
         web = await self.web.check_auth()
         return {
-            "auto_auth": {
-                "enabled": state.auto_enabled,
-                "username_configured": state.username_configured,
-                "password_configured": state.password_configured,
-                "totp_configured": state.totp_configured,
-            },
-            "app_api": {
-                "configured": app_configured,
-                "authenticated": app_authenticated,
-                "status": app_status,
-                "cached_credential_available": state.refresh_token_available,
-            },
-            "web_cookie": {
-                "configured": web.configured,
-                "authenticated": web.authenticated,
-                "status": web.status,
-                "cached_credential_available": state.cookie_available,
-            },
+            "app_api": {"configured": configured, "authenticated": authenticated, "status": state},
+            "web_cookie": {"configured": web.configured, "authenticated": web.authenticated, "status": web.status},
         }
 
     async def recover_auth(self) -> dict:
-        app_status = "unchanged"
-        web_status = "unchanged"
-        try:
-            self.refresh_token = await self.credentials.recover_refresh_token()
-            self._next_auth_at = 0.0
-            await self._ensure_auth(force=True)
-            app_status = "ok"
-        except AutoAuthError as exc:
-            app_status = exc.status
-        except PixivAuthError:
-            app_status = "authentication_failed"
-
-        probe = await self.web.check_auth()
-        if probe.authenticated:
-            web_status = "ok"
-        else:
-            try:
-                cookie = await self.credentials.recover_cookie()
-                self.web.set_cookie(cookie)
-                probe = await self.web.check_auth()
-                web_status = "ok" if probe.authenticated else probe.status
-            except AutoAuthError as exc:
-                web_status = exc.status
-        return {
-            "app_api": {"status": app_status},
-            "web_cookie": {"status": web_status},
-        }
+        """Revalidate manually configured credentials, never attempt account login."""
+        self._next_auth_at = 0.0
+        return await self.auth_status()
 
     async def get_novel_snapshot(self, pixiv_id: int) -> RemoteSnapshot:
         # gather() is kept so callers do not depend on ordering, while _api_lock
