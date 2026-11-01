@@ -127,3 +127,41 @@ class PixivWebClient:
             except (httpx.HTTPError, ValueError):
                 continue
         return None
+
+    async def get_illust_series(self, pixiv_id: int) -> dict[str, Any] | None:
+        """从作品详情提取漫画系列信息；不能识别时返回 None。"""
+        payload = await self._get_json(
+            f"/ajax/illust/{pixiv_id}",
+            referer=f"https://www.pixiv.net/artworks/{pixiv_id}",
+        )
+        if payload.get("error"):
+            return None
+        body = payload.get("body") or {}
+        if not isinstance(body, dict) or int(body.get("illustType") or 0) != 1:
+            return None
+        nav = body.get("seriesNavData") or {}
+        if not isinstance(nav, dict):
+            nav = {}
+        sid = nav.get("seriesId") or body.get("seriesId")
+        if not sid:
+            return None
+        return {
+            "id": str(sid),
+            "title": nav.get("title") or body.get("seriesTitle") or "",
+            "order": nav.get("order"),
+            "author_id": str(body.get("userId") or "0"),
+            "author_name": body.get("userName") or "",
+        }
+
+    async def get_manga_series_page(self, series_id: int, page: int) -> dict[str, Any]:
+        """Pixiv Web 漫画系列分页，API 可能调整，未知结构必须显式报错。"""
+        payload = await self._get_json(
+            f"/ajax/series/{series_id}?p={page}",
+            referer=f"https://www.pixiv.net/user/0/series/{series_id}",
+        )
+        if payload.get("error"):
+            raise ValueError("Pixiv manga series AJAX returned an error")
+        body = payload.get("body")
+        if not isinstance(body, dict):
+            raise ValueError("Pixiv manga series response body is missing")
+        return body
