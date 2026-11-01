@@ -10,17 +10,15 @@ class Settings(BaseSettings):
     storage_root: Path = Path("./data/pixiv")
     schema_check_on_startup: bool = True
 
-    # Manual credentials remain supported. AUTO_AUTH can populate missing/expired
-    # derived credentials from PIXIV_USERNAME/PIXIV_PASSWORD instead.
+    # Pixiv App/Web authentication is token/cookie-only (no password login).
     pixiv_refresh_token: str = ""
     pixiv_cookie: str = ""
-    pixiv_auto_auth: bool = False
-    pixiv_username: str = ""
-    pixiv_password: str = ""
-    pixiv_totp_secret: str = ""
-    pixiv_auth_cache_dir: Path = Path("/data/pixiv/auth")
-    pixiv_auto_login_cooldown_seconds: int = 900
-    pixiv_browser_timeout_seconds: int = 45
+    log_level: str = "INFO"
+    log_file: str = ""
+    log_max_bytes: int = 10 * 1024 * 1024
+    log_backup_count: int = 5
+    series_max_pages: int = 100
+    series_max_works: int = 2000
     pixiv_web_user_agent: str = "Mozilla/5.0"
     pixiv_web_accept_language: str = "zh-CN,zh;q=0.9,en;q=0.8"
     pixiv_web_locale: str = "zh-CN"
