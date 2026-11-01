@@ -191,6 +191,16 @@ class PixivPyClient(PixivClient):
     async def get_illust_snapshot(self, pixiv_id: int) -> RemoteSnapshot:
         result = await self._call(self.api.illust_detail, pixiv_id)
         snapshot = build_illust_snapshot(getattr(result, "illust", None), pixiv_id)
+        if snapshot.work_type == WorkType.MANGA:
+            try:
+                series = await self.web.get_illust_series(pixiv_id)
+                if series:
+                    snapshot.series_id = series["id"]
+                    snapshot.series_order = series.get("order")
+                    snapshot.metadata["series"] = series
+            except Exception:
+                # Series detection must not prevent an otherwise valid single-work archive.
+                pass
         if snapshot.work_type == WorkType.UGOIRA:
             metadata = await self._call(self.api.ugoira_metadata, pixiv_id)
             if self.settings.ugoira_prefer_original:
@@ -235,6 +245,128 @@ class PixivPyClient(PixivClient):
         return build_novel_snapshot(
             getattr(detail_result, "novel", None), text_result, pixiv_id
         )
+
+    async def detect_series(self, kind: WorkType, pixiv_id: int) -> tuple[str, int] | None:
+        """按作品 ID 检测所属系列，无法检测时返回 None。"""
+        if kind == WorkType.NOVEL:
+            payload = to_dict(await self._call(self.api.novel_detail, pixiv_id))
+            detail = payload.get("novel", {}) if isinstance(payload, dict) else {}
+            series = detail.get("series") or {}
+            sid = series.get("id") if isinstance(series, dict) else None
+            return ("novel", int(sid)) if sid else None
+        if kind in (WorkType.MANGA, WorkType.ILLUST):
+            info = await self.web.get_illust_series(pixiv_id)
+            if info:
+                return ("manga", int(info["id"]))
+        return None
+
+    async def discover_novel_series(self, series_id: int) -> dict:
+        """遍历 PixivPy novel_series 的 last_order 游标，禁止静默截断。"""
+        from app.core.config import get_settings
+        settings = get_settings()
+        seen_ids: set[int] = set()
+        seen_cursor: set[str] = set()
+        works: list[dict] = []
+        detail: dict = {}
+        cursor: str | None = None
+        for page_no in range(settings.series_max_pages):
+            response = await self._call(self.api.novel_series, series_id, last_order=cursor)
+            data = to_dict(response)
+            if not isinstance(data, dict):
+                raise ValueError("Invalid novel series payload")
+            if not detail:
+                detail = data.get("novel_series_detail") or {}
+                if not isinstance(detail, dict):
+                    detail = {}
+            batch = data.get("novels") or []
+            if not isinstance(batch, list):
+                raise ValueError("Invalid novel series works list")
+            for value in batch:
+                item = to_dict(value)
+                if not isinstance(item, dict) or not item.get("id"):
+                    continue
+                wid = int(item["id"])
+                if wid not in seen_ids:
+                    seen_ids.add(wid)
+                    info = item.get("series") or {}
+                    works.append({"id": wid, "kind": "novel", "order": (
+                        info.get("order") if isinstance(info, dict) else None
+                    ) or len(works) + 1})
+                    if len(works) > settings.series_max_works:
+                        raise ValueError("Novel series exceeds SERIES_MAX_WORKS")
+            next_url = data.get("next_url")
+            if not next_url:
+                break
+            params = await self._invoke_api(self.api.parse_qs, next_url)
+            next_cursor = str((params or {}).get("last_order") or "")
+            if not next_cursor or next_cursor in seen_cursor:
+                raise ValueError("Novel series pagination cursor did not advance")
+            seen_cursor.add(next_cursor)
+            cursor = next_cursor
+        else:
+            raise ValueError("Novel series exceeds SERIES_MAX_PAGES")
+        user = to_dict(detail.get("user") or {})
+        if not isinstance(user, dict):
+            user = {}
+        return {
+            "series_id": series_id, "series_type": "novel",
+            "title": detail.get("title") or f"Novel series {series_id}",
+            "caption": detail.get("caption"),
+            "author_id": str(user.get("id") or detail.get("user_id") or "0"),
+            "author_name": user.get("name") or detail.get("user_name") or "",
+            "published_total": detail.get("content_count") or detail.get("total") or len(works),
+            "is_completed": bool(detail.get("is_completed", False)),
+            "works": works,
+        }
+
+    async def discover_manga_series(self, series_id: int) -> dict:
+        """遍历漫画 Web AJAX；页数据不可信时不返回不完整结果。"""
+        settings = get_settings()
+        seen: set[int] = set()
+        works: list[dict] = []
+        meta: dict = {}
+        for page_no in range(1, settings.series_max_pages + 1):
+            body = await self.web.get_manga_series_page(series_id, page_no)
+            if page_no == 1:
+                meta = body.get("series") or body.get("seriesInfo") or {}
+                if not isinstance(meta, dict):
+                    meta = {}
+            thumbnails = body.get("thumbnails") or {}
+            batch = thumbnails.get("illust") if isinstance(thumbnails, dict) else None
+            if batch is None:
+                batch = body.get("illusts") or body.get("works")
+            if not isinstance(batch, (list, dict)):
+                raise ValueError("Unsupported manga series response structure")
+            if isinstance(batch, dict):
+                batch = list(batch.values())
+            new_count = 0
+            for value in batch:
+                item = to_dict(value)
+                if not isinstance(item, dict) or not (item.get("id") or item.get("illustId")):
+                    continue
+                wid = int(item.get("id") or item["illustId"])
+                if wid in seen:
+                    continue
+                seen.add(wid)
+                new_count += 1
+                works.append({"id": wid, "kind": "manga", "order": len(works) + 1})
+                if len(works) > settings.series_max_works:
+                    raise ValueError("Manga series exceeds SERIES_MAX_WORKS")
+            page = body.get("page") or {}
+            if not new_count or (isinstance(page, dict) and page.get("isLastPage") is True):
+                break
+        else:
+            raise ValueError("Manga series exceeds SERIES_MAX_PAGES")
+        return {
+            "series_id": series_id, "series_type": "manga",
+            "title": meta.get("title") or body.get("title") or f"Manga series {series_id}",
+            "caption": meta.get("caption"),
+            "author_id": str(meta.get("userId") or meta.get("user_id") or "0"),
+            "author_name": meta.get("userName") or meta.get("user_name") or "",
+            "published_total": meta.get("total") or len(works),
+            "is_completed": bool(meta.get("isCompleted", False)),
+            "works": works,
+        }
 
     async def get_authenticated_user_id(self) -> int:
         await self._ensure_auth()
