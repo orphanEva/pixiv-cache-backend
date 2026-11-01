@@ -45,7 +45,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON pixiv_archive.* TO 'pixiv'@'YOUR_API_HOS
 `works` 的系列类型必须和作品类型对应：
 `novel` 作品只能挂在小说系列下，`manga` 作品只能挂在漫画系列下。
 系列 ID 和系列类型要么同时为空，要么同时有值。
-同一个远端系列数字 ID 可以分别出现在小说系列和漫画系列中。
+同一个远端系列数字 ID 可以分别出现在小说系列和漫画系列中。\n已有作品引用的系列不能直接删除，必须先显式解除作品关联（数据库 RESTRICT）。
 
 ## 4. 启动
 
