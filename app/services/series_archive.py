@@ -80,29 +80,29 @@ class SeriesArchiveService:
             if wid in archived_ids:
                 member.status = "archived"
                 member.last_error = None
+        # 必须在 Redis 投递之前提交 queued；否则 worker 可能先归档成功，
+        # 之后 HTTP 请求又把数据库状态从 archived 覆盖回 queued。
+        for item in works:
+            member = members[str(item["id"])]
+            member.status = "queued"
+            member.last_error = None
         await self.session.commit()
 
         count = 0
         dedup = 0
-        # 独立投递：Redis 已成功投递的任务不可回滚，成员仍可手动重试。
+        # Redis 投递成功不可回滚；未投递的成员恢复为 discovered，可再次发起。
         try:
             for item in works:
-                wid = str(item["id"])
                 result = await self.queue.enqueue(
                     WorkType.NOVEL if series_type == "novel" else WorkType.MANGA,
-                    int(wid),
+                    int(item["id"]),
                     force_refresh=force_refresh,
                 )
                 dedup += int(bool(result.get("deduplicated")))
                 count += 1
-                member = members[wid]
-                member.status = "queued"
-                member.last_error = None
-                # 分段提交，避免中途网络异常丢失已入队状态。
-                if count % 100 == 0:
-                    await self.session.commit()
-            await self.session.commit()
         except Exception:
+            for item in works[count:]:
+                members[str(item["id"])].status = "discovered"
             await self.session.commit()
             logger.exception("series_enqueue_failed", extra={
                 "series_id": sid, "series_type": series_type, "queued": count,
