@@ -164,7 +164,7 @@ class ArchiveWorker:
                     update(SeriesMember)
                     .where(
                         SeriesMember.work_id == str(job["pixiv_id"]),
-                        SeriesMember.work_type == (
+                        SeriesMember.series_type == (
                             "novel" if job["kind"] == "novel" else "manga"
                         ),
                     )
