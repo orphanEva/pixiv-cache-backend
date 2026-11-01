@@ -143,7 +143,7 @@ class CacheService:
                     await self.session.execute(
                         select(SeriesMember).where(
                             SeriesMember.work_id == str(pixiv_id),
-                            SeriesMember.work_type == "manga",
+                            SeriesMember.series_type == "manga",
                         ).limit(1)
                     )
                 ).scalar_one_or_none()
@@ -193,6 +193,9 @@ class CacheService:
                 await self._sync_series(snapshot)
                 if snapshot.series_id is not None or snapshot.work_type == WorkType.NOVEL:
                     work.series_id = snapshot.series_id
+                    work.series_type = (
+                        "novel" if snapshot.work_type == WorkType.NOVEL else "manga"
+                    ) if snapshot.series_id else None
                     work.series_order = snapshot.series_order
                 work.status = WorkStatus.ACTIVE
                 work.status_reason = None
@@ -237,6 +240,9 @@ class CacheService:
                 work.x_restrict = snapshot.x_restrict
                 work.is_ai = snapshot.is_ai
                 work.series_id = snapshot.series_id
+                work.series_type = (
+                    "novel" if snapshot.work_type == WorkType.NOVEL else "manga"
+                ) if snapshot.series_id else None
                 work.series_order = snapshot.series_order
                 work.remote_created_at = utc_naive(snapshot.created_at)
                 work.remote_updated_at = utc_naive(snapshot.updated_at)
@@ -299,7 +305,7 @@ class CacheService:
         if not isinstance(series_info, dict):
             series_info = {}
         series_type = "novel" if snapshot.work_type == WorkType.NOVEL else "manga"
-        series = await self.session.get(Series, snapshot.series_id)
+        series = await self.session.get(Series, {"type": series_type, "id": snapshot.series_id})
         if series is None:
             series = Series(
                 id=snapshot.series_id, type=series_type,
@@ -309,8 +315,6 @@ class CacheService:
             )
             self.session.add(series)
             await self.session.flush()
-        elif series.type != series_type:
-            raise ValueError("Pixiv series id collision across novel/manga")
         else:
             # Existing series metadata can change without adding a new work.
             if series_info.get("title"):
