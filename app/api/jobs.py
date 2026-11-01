@@ -86,14 +86,15 @@ async def enqueue_archive_job(
     return await queue().enqueue(kind, pixiv_id, force_refresh=force_refresh)
 
 
-@router.get("/series/{series_id}")
+@router.get("/series/{series_type}/{series_id}")
 async def get_series_archive_status(
+    series_type: Literal["novel", "manga"],
     series_id: int,
     session: AsyncSession = Depends(get_session),
     client: PixivPyClient = Depends(get_client),
 ):
     try:
-        return await SeriesArchiveService(session, client, queue()).status(series_id)
+        return await SeriesArchiveService(session, client, queue()).status(series_type, series_id)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
 
