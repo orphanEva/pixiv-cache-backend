@@ -70,3 +70,37 @@ def test_redact_configured_token(monkeypatch):
     from app.core.config import get_settings
     monkeypatch.setattr(get_settings(), "pixiv_refresh_token", "long-secret-token-for-test")
     assert "long-secret-token-for-test" not in redact("invalid long-secret-token-for-test")
+
+
+@pytest.mark.asyncio
+async def test_direct_novel_model_snapshot_and_series_detection(monkeypatch):
+    """PixivPy >=3.7 novel_detail returns NovelInfo directly, not {'novel': ...}."""
+    from types import SimpleNamespace
+    from app.models.work import WorkType
+    client = PixivPyClient()
+    async def fake_call(fn, *args, **kwargs):
+        if fn == client.api.novel_detail:
+            return SimpleNamespace(
+                id=2345, title="第一卷", caption="", tags=[], user={"id": 1, "name": "A"},
+                series={"id": 991, "order": 3},
+            )
+        return {"novel_text": "正文"}
+    monkeypatch.setattr(client, "_call", fake_call)
+    assert await client.detect_series(WorkType.NOVEL, 2345) == ("novel", 991)
+    snapshot = await client.get_novel_snapshot(2345)
+    assert snapshot.series_id == "991"
+    assert snapshot.text_content == "正文"
+
+
+@pytest.mark.asyncio
+async def test_illust_json_detail_is_read_correctly(monkeypatch):
+    client = PixivPyClient()
+    async def fake_call(fn, *args, **kwargs):
+        return {"illust": {
+            "id": 10, "title": "漫画", "type": "illust", "tags": [],
+            "meta_single_page": {"original_image_url": "https://i.pximg.net/10_p0.jpg"},
+            "user": {"id": 22, "name": "Author"}
+        }}
+    monkeypatch.setattr(client, "_call", fake_call)
+    snap = await client.get_illust_snapshot(10)
+    assert snap.pixiv_id == 10 and snap.title == "漫画"
