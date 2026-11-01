@@ -20,7 +20,7 @@ from app.core.errors import (
     PixivRestrictedError, PixivUnavailableError,
 )
 from app.models.work import (
-    CurrentFile, PixivAsset, PixivVersion, PixivWork, Series,
+    CurrentFile, PixivAsset, PixivVersion, PixivWork, Series, SeriesMember,
     Tag, WorkStatus, WorkTagRelation, WorkType,
 )
 from app.schemas.pixiv import (
@@ -137,6 +137,23 @@ class CacheService:
                 raise
 
             lock.ensure_alive()
+            if snapshot.work_type == WorkType.MANGA and not snapshot.series_id:
+                # 已通过系列接口发现的成员不依赖漫画作品详情页二次成功识别。
+                relation = (
+                    await self.session.execute(
+                        select(SeriesMember).where(
+                            SeriesMember.work_id == str(pixiv_id),
+                            SeriesMember.work_type == "manga",
+                        ).limit(1)
+                    )
+                ).scalar_one_or_none()
+                if relation is not None:
+                    snapshot.series_id = relation.series_id
+                    snapshot.series_order = relation.series_order
+                    snapshot.metadata["series"] = {
+                        "id": relation.series_id,
+                        "order": relation.series_order,
+                    }
             token_unchanged = bool(
                 work and work.version_token == snapshot.version_token
             )
@@ -174,8 +191,9 @@ class CacheService:
             if token_unchanged and binary_unchanged:
                 # 系列关系可能调整但作品内容指纹不变；不能因此漏掉关联更新。
                 await self._sync_series(snapshot)
-                work.series_id = snapshot.series_id
-                work.series_order = snapshot.series_order
+                if snapshot.series_id is not None or snapshot.work_type == WorkType.NOVEL:
+                    work.series_id = snapshot.series_id
+                    work.series_order = snapshot.series_order
                 work.status = WorkStatus.ACTIVE
                 work.status_reason = None
                 work.last_checked_at = now_utc()
