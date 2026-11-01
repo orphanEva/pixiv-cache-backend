@@ -116,6 +116,8 @@ class SeriesArchiveService:
             "series_id": sid, "series_type": series_type,
             "discovered": len(works), "queued": count,
             "deduplicated": dedup, "already_archived": len(archived_ids),
+            "published_total": series.published_total,
+            "discovery_complete": len(works) >= series.published_total,
         }
 
     async def status(self, series_id: int) -> dict:
@@ -134,6 +136,7 @@ class SeriesArchiveService:
             "title": series.title,
             "published_total": series.published_total,
             "discovered": len(members),
+            "discovery_complete": len(members) >= series.published_total,
             "status_counts": {
                 status: sum(m.status == status for m in members)
                 for status in ("discovered", "queued", "archived", "failed")
