@@ -36,15 +36,13 @@ class SeriesArchiveService:
         if len({int(item["id"]) for item in works}) != len(works):
             raise ValueError("Series discovery contains duplicate work IDs")
         sid = str(series_id)
-        # 旧表 series.id 不是复合主键：发现不同类型 ID 冲突时拒绝覆盖数据。
-        series = await self.session.get(Series, sid)
+        # 合集按 (type, id) 定位；漫画、小说可使用相同远端 ID。
+        series = await self.session.get(Series, {"type": series_type, "id": sid})
         if series is None:
             series = Series(
                 id=sid, type=series_type, title="", author_id="0", author_name=""
             )
             self.session.add(series)
-        elif series.type != series_type:
-            raise ValueError("series.id collision between manga and novel namespaces")
         series.title = str(discovery["title"])[:255]
         series.caption = discovery.get("caption")
         series.author_id = str(discovery.get("author_id") or "0")[:32]
@@ -55,7 +53,10 @@ class SeriesArchiveService:
 
         existing = (
             await self.session.execute(
-                select(SeriesMember).where(SeriesMember.series_id == sid)
+                select(SeriesMember).where(
+                    SeriesMember.series_type == series_type,
+                    SeriesMember.series_id == sid,
+                )
             )
         ).scalars().all()
         members = {item.work_id: item for item in existing}
@@ -65,6 +66,7 @@ class SeriesArchiveService:
                 select(PixivWork.id).where(
                     PixivWork.id.in_(ids),
                     PixivWork.series_id == sid,
+                    PixivWork.series_type == series_type,
                 )
             )
         ).scalars().all())
@@ -72,10 +74,9 @@ class SeriesArchiveService:
             wid = str(item["id"])
             member = members.get(wid)
             if member is None:
-                member = SeriesMember(series_id=sid, work_id=wid)
+                member = SeriesMember(series_type=series_type, series_id=sid, work_id=wid)
                 self.session.add(member)
                 members[wid] = member
-            member.work_type = series_type
             member.series_order = item.get("order")
             if wid in archived_ids:
                 member.status = "archived"
@@ -120,13 +121,16 @@ class SeriesArchiveService:
             "discovery_complete": len(works) >= series.published_total,
         }
 
-    async def status(self, series_id: int) -> dict:
-        series = await self.session.get(Series, str(series_id))
+    async def status(self, series_type: str, series_id: int) -> dict:
+        series = await self.session.get(Series, {"type": series_type, "id": str(series_id)})
         if series is None:
             raise LookupError("Series not yet discovered")
         members = (
             await self.session.execute(
-                select(SeriesMember).where(SeriesMember.series_id == str(series_id))
+                select(SeriesMember).where(
+                    SeriesMember.series_type == series_type,
+                    SeriesMember.series_id == str(series_id),
+                )
                 .order_by(SeriesMember.series_order, SeriesMember.work_id)
             )
         ).scalars().all()
