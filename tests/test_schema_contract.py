@@ -10,6 +10,7 @@ def test_archive_schema_contract():
         "schema_version",
         "works",
         "series",
+        "series_members",
         "tags",
         "work_files",
         "work_history",
@@ -50,6 +51,13 @@ def test_manual_v3_to_v4_upgrade_exists():
     sql = Path("sql/upgrades/v3_to_v4.sql").read_text()
     assert "CREATE TABLE work_sources" in sql
     assert "SET version = 4" in sql
+    assert "DROP TABLE" not in sql
+
+
+def test_manual_v4_to_v5_upgrade_exists():
+    sql = Path("sql/upgrades/v4_to_v5.sql").read_text()
+    assert "CREATE TABLE IF NOT EXISTS series_members" in sql
+    assert "SET version=5" in sql
     assert "DROP TABLE" not in sql
 
 
