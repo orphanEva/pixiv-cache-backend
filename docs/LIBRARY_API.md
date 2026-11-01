@@ -132,10 +132,10 @@ through `/works?tag=...`.
 
 ```http
 GET /api/library/series
-GET /api/library/series/{series_id}
+GET /api/library/series/{series_type}/{series_id}
 ```
 
-Retrieve series works through `/works?series_id=...`.
+Retrieve series works through `/works?series_type=novel&series_id=...` or `/works?series_type=manga&series_id=...`. Numeric series IDs may exist in both namespaces.
 
 ## Statistics
 
