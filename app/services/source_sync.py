@@ -121,6 +121,8 @@ class SourceSyncService:
                 raise ValueError("Invalid novel watchlist page")
             if batch and all(sid in seen for sid in batch):
                 raise ValueError("Pixiv watchlist pagination did not advance")
+            if not batch and result.get("has_next") is True:
+                raise ValueError("Pixiv watchlist returned an empty page but claims more pages")
             for sid in batch:
                 if sid not in seen:
                     seen.add(sid)
