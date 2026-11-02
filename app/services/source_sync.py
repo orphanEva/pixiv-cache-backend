@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.base import PixivClient
 from app.models.work import SyncSource, SyncSourceType, WorkType
+from app.core.errors import PixivRemoteError
 from app.services.archive_jobs import ArchiveJobQueue
 from app.services.cache_service import now_utc
 from app.services.series_archive import SeriesArchiveService
@@ -139,13 +140,24 @@ class SourceSyncService:
         totals = {"series": len(series_ids), "discovered": 0,
                   "archive_jobs": 0, "already_archived": 0, "pages": pages}
         series_service = SeriesArchiveService(self.session, self.client, self.archive_queue)
+        failed_series: list[int] = []
         for sid in series_ids:
-            outcome = await series_service.enqueue(
-                "novel", sid, force_refresh=False, only_missing=True, source_id=source.id
+            try:
+                outcome = await series_service.enqueue(
+                    "novel", sid, force_refresh=False, only_missing=True, source_id=source.id
+                )
+                totals["discovered"] += outcome["discovered"]
+                totals["archive_jobs"] += outcome["queued"]
+                totals["already_archived"] += outcome["already_archived"]
+            except (PixivRemoteError, ValueError):
+                # 个别合集已删除或受限时继续处理其他追更；仍需将本轮标记为失败。
+                failed_series.append(sid)
+
+        if failed_series:
+            raise ValueError(
+                f"Unable to archive {len(failed_series)} watched novel series; "
+                f"series IDs: {','.join(str(sid) for sid in failed_series[:20])}"
             )
-            totals["discovered"] += outcome["discovered"]
-            totals["archive_jobs"] += outcome["queued"]
-            totals["already_archived"] += outcome["already_archived"]
 
         source.frontier_json = {"novel_series": [str(sid) for sid in series_ids]}
         source.last_success_at = now_utc()
