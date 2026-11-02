@@ -1,7 +1,7 @@
-# pixiv_archive 数据库初始化（全新项目 / Schema v6）
+# pixiv_archive 数据库初始化与升级（Schema v7）
 
-> 当前项目尚未投入使用，因此采用重新设计后的 **v6 全新建库结构**。
-> 原有 v1-v5 升级脚本不适用于 v6，**不要按旧脚本逐级升级**。
+> 已有 v6 数据库可以保留数据升级到 v7；不要重建已有库。
+> 原有 v1-v5 升级脚本不适用于 v7，**不要按旧脚本逐级升级**。
 
 ## 1. 手动初始化（MySQL 8.0+）
 
@@ -12,7 +12,7 @@ mysql -h MYSQL_HOST -u root -p < sql/pixiv_archive.sql
 ```
 
 DDL 不包含 DROP TABLE，适合空库。非空库请先单独备份，不要直接运行此脚本覆盖。
-程序容器不建表或自动升级（禁止运行时 DDL），仅检查 `schema_version=6`。
+程序容器不建表或自动升级（禁止运行时 DDL），仅检查 `schema_version=7`。
 
 ## 2. 创建专用 DML 账号
 
@@ -37,7 +37,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON pixiv_archive.* TO 'pixiv'@'YOUR_API_HOS
 | `work_files` | 当前版本文件索引（作品/页码/类型唯一） |
 | `work_history_files` | 历史文件索引（版本/页码/类型唯一） |
 | `tags` / `work_tag_relation` | 标签与作品关联 |
-| `sync_sources` / `work_sources` | 作者/收藏同步来源及归因 |
+| `sync_sources` / `work_sources` | 作者/收藏/小说追更同步来源及归因 |
 
 `series_members` **故意不为 work_id 设置作品外键**：发现作品可以先写入，
 待实际下载归档后才会创建 `works` 记录。
@@ -56,11 +56,32 @@ curl -sS http://127.0.0.1:18081/health/ready
 docker compose logs -f api worker
 ```
 
-若提示 schema version 不匹配，说明不是 v6 空库，必须人工确认数据状态，
+若提示 schema version 不匹配，说明不是 v7 数据库，必须人工确认数据状态，
 不能修改 `schema_version` 数字来跳过检查。
 
 ## 5. 旧版本数据库
 
 本次未提供自动 v5→v6 数据迁移：因为尚未投入使用。如果今后发现
 确实存在旧版需要保留的数据，应单独编写有备份、回滚、校验的迁移。
-旧版升级脚本仅属历史参考，不能组合出 v6 结构。
+旧版 v1-v5 升级脚本仅属历史参考，不能组合出 v6/v7 结构。
+
+
+## 6. 现有 v6 数据库升级到 v7（不会删除归档数据）
+
+如果已经运行过收藏夹同步、`sync_sources` 和 `works` 等表里有数据：
+
+1. 备份 MySQL 和 `data/pixiv`，停止 FastAPI、sync_worker、archive_worker、integrity_worker。
+2. 用 MySQL 管理员确认 `SELECT version FROM pixiv_archive.schema_version WHERE id=1;` 返回 **6**。
+3. 在仓库目录运行：
+
+```bash
+mysql -h MYSQL_HOST -u root -p < sql/upgrades/v6_to_v7.sql
+```
+
+4. 验证 `schema_version` 是 **7**，`sync_sources` 旧记录仍在。
+5. 再启动项目。脚本只扩展 `sync_sources.type` 枚举，不删除作品或文件。
+
+不要仅手动更改 schema_version，也不要在有数据的库执行 `sql/pixiv_archive.sql`。
+
+如需追更小说合集，在 `.env` 填 `PIXIV_COOKIE`，调用
+`POST /api/sync/sources/watchlist/novel?run_now=true` 注册来源。
