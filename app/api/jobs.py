@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.core.redis_client import get_redis
+from app.core.errors import PixivRemoteError
 from app.db.session import get_session
 from app.api.routes import get_client
 from app.clients.pixivpy_client import PixivPyClient
@@ -51,6 +52,9 @@ async def enqueue_series_archive(
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    except PixivRemoteError as exc:
+        # Pixiv 已识别的 404/403/401/503 应原样返回客户端，避免误报服务器故障。
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.post("/archive/{kind}/{pixiv_id}", status_code=status.HTTP_202_ACCEPTED)
@@ -83,6 +87,8 @@ async def enqueue_archive_job(
             except ValueError as exc:
                 # 明确的结构/完整性错误不允许误报为“全集已下载”。
                 raise HTTPException(422, str(exc)) from exc
+            except PixivRemoteError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return await queue().enqueue(kind, pixiv_id, force_refresh=force_refresh)
 
 

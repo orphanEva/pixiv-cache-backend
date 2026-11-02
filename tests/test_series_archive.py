@@ -104,3 +104,68 @@ async def test_illust_json_detail_is_read_correctly(monkeypatch):
     monkeypatch.setattr(client, "_call", fake_call)
     snap = await client.get_illust_snapshot(10)
     assert snap.pixiv_id == 10 and snap.title == "漫画"
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_class,expected_status", [
+    ("PixivNotFoundError", 404),
+    ("PixivRestrictedError", 403),
+    ("PixivAuthError", 401),
+    ("PixivUnavailableError", 503),
+])
+async def test_explicit_series_archive_maps_remote_errors_to_http_status(
+    monkeypatch, error_class, expected_status
+):
+    """合集发现异常不能变成 FastAPI 未处理的 HTTP 500。"""
+    from fastapi import HTTPException
+    from app.api.jobs import enqueue_series_archive
+    from app.core import errors
+    from app.services.series_archive import SeriesArchiveService
+
+    async def failed_discovery(self, kind, series_id, *, force_refresh=True):
+        raise getattr(errors, error_class)("Pixiv series request failed")
+
+    monkeypatch.setattr(SeriesArchiveService, "enqueue", failed_discovery)
+    monkeypatch.setattr("app.api.jobs.queue", lambda: object())
+    with pytest.raises(HTTPException) as caught:
+        await enqueue_series_archive(
+            series_type="novel",
+            series_id=28356186,
+            force_refresh=True,
+            session=object(),
+            client=object(),
+        )
+    assert caught.value.status_code == expected_status
+
+
+@pytest.mark.asyncio
+async def test_auto_expand_series_maps_not_found_to_http_404(monkeypatch):
+    """单篇小说识别出合集后，合集失败也应该返回明确的 404。"""
+    from fastapi import HTTPException
+    from app.api.jobs import enqueue_archive_job
+    from app.core.errors import PixivNotFoundError
+    from app.models.work import WorkType
+    from app.services.series_archive import SeriesArchiveService
+
+    class FakePixiv:
+        async def detect_series(self, kind, pixiv_id):
+            assert kind == WorkType.NOVEL
+            return ("novel", 28356186)
+
+    async def failed_discovery(self, kind, series_id, *, force_refresh=True):
+        raise PixivNotFoundError("This series no longer exists")
+
+    monkeypatch.setattr(SeriesArchiveService, "enqueue", failed_discovery)
+    monkeypatch.setattr("app.api.jobs.queue", lambda: object())
+    with pytest.raises(HTTPException) as caught:
+        await enqueue_archive_job(
+            kind=WorkType.NOVEL,
+            pixiv_id=123456,
+            force_refresh=True,
+            expand_series=True,
+            session=object(),
+            client=FakePixiv(),
+        )
+    assert caught.value.status_code == 404
+    assert "no longer exists" in caught.value.detail
