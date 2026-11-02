@@ -575,7 +575,7 @@ POST /api/ops/jobs/{job_id}/replay
 
 最新 `sql/pixiv_archive.sql` 已为每张表、每个字段提供中文 COMMENT，
 适合直接在 DataGrip、Navicat 或 IDEA Database 查看。
-当前程序要求 `schema_version=6`，且只支持重新初始化的空数据库。
+当前程序要求 `schema_version=7`；新装使用最新 DDL，已有 v6 库通过 `sql/upgrades/v6_to_v7.sql` 升级。
 
 
 ## 自动备份小说追更列表（v1.8，Schema v7）
@@ -586,7 +586,7 @@ POST /api/ops/jobs/{job_id}/replay
 启动同步源（默认每 6 小时重新扫描一次所有仍在追更的小说合集）：
 
 ```sh
-curl -X POST -H "X-API-Key: $API_KEY" \\
+curl -X POST -H "X-API-Key: $API_KEY" \
   "http://127.0.0.1:18081/api/sync/sources/watchlist/novel?run_now=true&interval_seconds=21600"
 ```
 
