@@ -98,3 +98,36 @@ async def test_watchlist_sync_rescans_existing_series_instead_of_stopping_at_fro
     assert all(x[2] == {
         "force_refresh": False, "only_missing": True, "source_id": 7
     } for x in calls)
+
+
+@pytest.mark.asyncio
+async def test_inaccessible_watched_series_does_not_block_other_series(monkeypatch):
+    from app.core.errors import PixivNotFoundError
+    calls = []
+
+    class Session:
+        async def commit(self): pass
+        async def rollback(self): pass
+        async def get(self, cls, source_id): return source
+
+    class Web:
+        async def get_watched_novel_series_page(self, page):
+            return {"series_ids": [101, 102], "has_next": False}
+
+    async def enqueue(self, kind, sid, **kwargs):
+        calls.append(sid)
+        if sid == 101:
+            raise PixivNotFoundError("deleted")
+        return {"discovered": 2, "queued": 2, "already_archived": 0}
+
+    monkeypatch.setattr("app.services.series_archive.SeriesArchiveService.enqueue", enqueue)
+    source = SimpleNamespace(
+        id=9, source_type=SyncSourceType.WATCHLIST, remote_user_id="novel",
+        include_novel=True, interval_seconds=3600, frontier_json={},
+        last_run_at=None, last_error=None, last_success_at=None, next_run_at=None,
+    )
+    service = SourceSyncService(Session(), SimpleNamespace(web=Web()), None)
+    with pytest.raises(ValueError, match="Unable to archive 1 watched novel series"):
+        await service.run_source(source)
+    assert calls == [101, 102]
+    assert source.last_error and "101" in source.last_error
