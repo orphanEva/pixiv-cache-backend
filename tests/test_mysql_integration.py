@@ -829,3 +829,30 @@ async def test_archive_retry_dead_letter_and_replay_lifecycle():
             await redis_client.delete(key)
         for key, value in old.items():
             setattr(settings, key, value)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_mysql_watchlist_source_enum_preserves_other_source_types():
+    """CI 以 v7 DDL 初始化 MySQL，验证新增的追更同步来源可持久化。"""
+    source_id = None
+    async with SessionLocal() as session:
+        row = SyncSource(
+            source_type=SyncSourceType.WATCHLIST,
+            remote_user_id="novel",
+            restrict_mode=SyncRestrict.PUBLIC,
+            include_illust=False,
+            include_novel=True,
+            interval_seconds=21600,
+            enabled=False,
+        )
+        session.add(row)
+        await session.commit()
+        source_id = row.id
+        try:
+            loaded = await session.get(SyncSource, source_id)
+            assert loaded.source_type == SyncSourceType.WATCHLIST
+            assert loaded.remote_user_id == "novel"
+            assert loaded.include_novel is True
+        finally:
+            await session.execute(delete(SyncSource).where(SyncSource.id == source_id))
+            await session.commit()
