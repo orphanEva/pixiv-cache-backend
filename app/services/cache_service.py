@@ -7,6 +7,7 @@ import logging
 import shutil
 
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -335,20 +336,30 @@ class CacheService:
         # A separately committed tag dictionary survives individual work updates;
         # relations are rebuilt transactionally against the current snapshot.
         seen_names: set[str] = set()
+        tag_ids: set[int] = set()
         for tag in tags:
             name = str(tag.get("name") or "").strip()[:128]
-            if name in seen_names:
+            if not name or name in seen_names:
                 continue
             seen_names.add(name)
-            if not name:
-                continue
             tag_id = (await self.session.execute(select(Tag.id).where(Tag.name == name))).scalar_one_or_none()
             if tag_id is None:
                 record = Tag(name=name, translated_name=(tag.get("translated_name") or None)[:128] if tag.get("translated_name") else None)
                 self.session.add(record)
                 await self.session.flush()
                 tag_id = record.id
-            self.session.add(WorkTagRelation(work_id=work_id, tag_id=tag_id))
+            # MySQL 默认 utf8mb4_unicode_ci 不区分大小写和部分重音：
+            # 不同 Python 字符串可能查询到同一个 Tag.id，必须按数据库 ID 去重。
+            tag_ids.add(int(tag_id))
+
+        if tag_ids:
+            # 原子幂等写入，避免 SQLAlchemy 后续 autoflush 才因重复联合主键失败。
+            stmt = mysql_insert(WorkTagRelation).values(
+                [{"work_id": work_id, "tag_id": tid} for tid in sorted(tag_ids)]
+            )
+            await self.session.execute(
+                stmt.on_duplicate_key_update(tag_id=stmt.inserted.tag_id)
+            )
 
     async def _mark_remote_status(self, work: PixivWork | None, status: WorkStatus, reason: str) -> None:
         if work is None:
