@@ -7,8 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.base import PixivClient
 from app.models.work import SyncSource, SyncSourceType, WorkType
+from app.core.errors import PixivRemoteError
 from app.services.archive_jobs import ArchiveJobQueue
 from app.services.cache_service import now_utc
+from app.services.series_archive import SeriesArchiveService
 
 
 class SourceSyncService:
@@ -31,6 +33,8 @@ class SourceSyncService:
         await self.session.commit()
 
         try:
+            if source.source_type == SyncSourceType.WATCHLIST:
+                return await self._run_novel_watchlist(source)
             remote_user_id = await self._resolve_user_id(source.remote_user_id)
             previous = source.frontier_json or {}
             next_frontier = dict(previous)
@@ -95,6 +99,80 @@ class SourceSyncService:
                 )
                 await self.session.commit()
             raise
+
+
+    async def _run_novel_watchlist(self, source: SyncSource) -> dict:
+        """每轮完整枚举当前追更列表，再为每个合集发现新章节。
+
+        不采用普通收藏夹的 frontier 提前停止规则：旧合集也会更新章节。
+        取消追更后该合集不再被本轮扫描，已保存内容不删除。
+        """
+        if source.remote_user_id != "novel" or not source.include_novel:
+            raise ValueError("Unsupported watchlist sync source")
+        web = self.client.web
+        series_ids: list[int] = []
+        seen: set[int] = set()
+        pages = 0
+        # 与普通同步源共用页数上限，超限时不记录成功进度。
+        for page in range(1, self.settings.sync_max_pages_per_run + 1):
+            result = await web.get_watched_novel_series_page(page)
+            pages += 1
+            batch = result["series_ids"]
+            if not isinstance(batch, list):
+                raise ValueError("Invalid novel watchlist page")
+            if batch and all(sid in seen for sid in batch):
+                raise ValueError("Pixiv watchlist pagination did not advance")
+            if not batch and result.get("has_next") is True:
+                raise ValueError("Pixiv watchlist returned an empty page but claims more pages")
+            for sid in batch:
+                if sid not in seen:
+                    seen.add(sid)
+                    series_ids.append(sid)
+                if len(series_ids) > 1000:
+                    raise ValueError("Novel watchlist exceeds Pixiv's 1000-series limit")
+            if result.get("has_next") is False or not batch:
+                break
+            if self.settings.sync_page_delay_seconds > 0:
+                await asyncio.sleep(self.settings.sync_page_delay_seconds)
+        else:
+            raise ValueError("Novel watchlist exceeded SYNC_MAX_PAGES_PER_RUN")
+
+        totals = {"series": len(series_ids), "discovered": 0,
+                  "archive_jobs": 0, "already_archived": 0, "pages": pages}
+        series_service = SeriesArchiveService(self.session, self.client, self.archive_queue)
+        failed_series: list[int] = []
+        for sid in series_ids:
+            try:
+                outcome = await series_service.enqueue(
+                    "novel", sid, force_refresh=False, only_missing=True, source_id=source.id
+                )
+                totals["discovered"] += outcome["discovered"]
+                totals["archive_jobs"] += outcome["queued"]
+                totals["already_archived"] += outcome["already_archived"]
+            except (PixivRemoteError, ValueError):
+                # 个别合集已删除或受限时继续处理其他追更；仍需将本轮标记为失败。
+                failed_series.append(sid)
+
+        if failed_series:
+            raise ValueError(
+                f"Unable to archive {len(failed_series)} watched novel series; "
+                f"series IDs: {','.join(str(sid) for sid in failed_series[:20])}"
+            )
+
+        source.frontier_json = {"novel_series": [str(sid) for sid in series_ids]}
+        source.last_success_at = now_utc()
+        source.last_error = None
+        source.next_run_at = now_utc() + timedelta(
+            seconds=max(60, int(source.interval_seconds))
+        )
+        await self.session.commit()
+        return {
+            "source_id": source.id,
+            "source_type": source.source_type.value,
+            "remote_user_id": source.remote_user_id,
+            "full": True,
+            **totals,
+        }
 
     async def _resolve_user_id(self, value: str) -> int:
         if value == "self":

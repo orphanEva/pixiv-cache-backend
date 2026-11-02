@@ -36,6 +36,7 @@ class WorkStatus(str, enum.Enum):
 class SyncSourceType(str, enum.Enum):
     AUTHOR = "author"
     BOOKMARKS = "bookmarks"
+    WATCHLIST = "watchlist"
 
 
 class SyncRestrict(str, enum.Enum):

@@ -8,6 +8,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.redis_client import get_redis
+from app.core.config import get_settings
 from app.db.session import get_session
 from app.models.work import SyncRestrict, SyncSource, SyncSourceType
 from app.services.cache_service import now_utc
@@ -138,6 +139,27 @@ async def upsert_bookmark_source(
         restrict=restrict,
         include_illust=include_illust,
         include_novel=include_novel,
+        interval_seconds=interval_seconds,
+        run_now=run_now,
+    )
+
+
+@router.post("/sources/watchlist/novel")
+async def upsert_novel_watchlist_source(
+    interval_seconds: int = Query(21600, ge=300),
+    run_now: bool = Query(True),
+    session: AsyncSession = Depends(get_session),
+):
+    """订阅当前 Pixiv Web Cookie 账号的小说追更列表，自动补齐全集。"""
+    if not get_settings().pixiv_cookie.strip():
+        raise HTTPException(422, "Configure PIXIV_COOKIE before syncing the novel watchlist")
+    return await _upsert_source(
+        session,
+        source_type=SyncSourceType.WATCHLIST,
+        remote_user_id="novel",
+        restrict=SyncRestrict.PUBLIC,
+        include_illust=False,
+        include_novel=True,
         interval_seconds=interval_seconds,
         run_now=run_now,
     )

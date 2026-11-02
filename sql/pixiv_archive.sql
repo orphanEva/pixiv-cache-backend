@@ -13,7 +13,7 @@ CREATE TABLE schema_version (
   CONSTRAINT chk_schema_version_singleton CHECK (id = 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='数据库结构版本元数据';
 
-INSERT INTO schema_version (id, version) VALUES (1, 6);
+INSERT INTO schema_version (id, version) VALUES (1, 7);
 
 CREATE TABLE series (
   id VARCHAR(32) NOT NULL COMMENT 'Pixiv 系列 ID',
@@ -134,7 +134,7 @@ CREATE TABLE work_tag_relation (
 
 CREATE TABLE sync_sources (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '同步源本地主键',
-  type ENUM('author','bookmarks') NOT NULL COMMENT '同步源类型：作者作品或收藏',
+  type ENUM('author','bookmarks','watchlist') NOT NULL COMMENT '同步源类型：作者、收藏或追更列表',
   remote_user_id VARCHAR(32) NOT NULL COMMENT 'Pixiv 用户 ID；self 表示当前认证账号',
   restrict_mode ENUM('public','private') NOT NULL DEFAULT 'public' COMMENT '收藏可见范围：公开或私密',
   include_illust TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否同步插画/漫画/Ugoira',
@@ -151,7 +151,7 @@ CREATE TABLE sync_sources (
   PRIMARY KEY (id),
   UNIQUE KEY uk_sync_source_identity (type, remote_user_id, restrict_mode),
   KEY idx_sync_due (enabled, next_run_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作者或收藏的持久化自动同步配置';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作者、收藏或追更列表的持久化自动同步配置';
 
 CREATE TABLE work_sources (
   work_id VARCHAR(32) NOT NULL COMMENT 'Pixiv 作品 ID',

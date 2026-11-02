@@ -21,7 +21,7 @@ dump are *different schemas* and need an explicit, reviewed data migration.
 Versioned archive and series/synchronization tables:
 
 - `schema_version`: manually applied database schema version (metadata only)
-- `sync_sources`: persistent author/bookmark synchronization subscriptions
+- `sync_sources`: persistent author/bookmark/novel-watchlist synchronization subscriptions
 - `work_sources`: many-to-many attribution from archived works to sync sources
 - `works`: current work metadata, fingerprint, accessibility, current version
 - `series`: typed series identity (composite primary key `type,id`) and metadata
@@ -242,10 +242,10 @@ Use `verify_hash=true` for a full SHA-256 audit. The endpoint reports missing
 registered files, hash mismatches, orphan version directories, stale `.part`
 files, and paths outside the configured storage root. It never deletes files.
 
-### 数据库版本：v6 全新初始化
+### 数据库版本：v7 全新初始化
 
 因为项目还没有投入使用，这次直接重构了系列表的主键和外键。
-**仅支持从 `sql/pixiv_archive.sql` 初始化全新空库；不要执行以前的 v1-v5 升级脚本来获得 v6。**
+**全新空库执行 `sql/pixiv_archive.sql` (v7)；已运行 v6 数据库请备份后执行 `sql/upgrades/v6_to_v7.sql`，不要重新建库。**
 运行时程序从不自动建表或迁移。详见
 [全新建库指南](docs/MANUAL_DATABASE_SETUP.md)。
 
@@ -425,7 +425,7 @@ existing archive Redis Stream.
 
 ### 历史版本结构说明
 
-本节介绍旧版的同步源功能；当前运行版本使用 v6 全新建表，不应套用历史迁移脚本。
+本节介绍旧版的同步源功能；当前运行版本使用 v7 新建表，运行中的 v6 数据库可手动升级，不应套用历史迁移脚本。
 
 ## v1.5 API-first library
 
@@ -575,4 +575,26 @@ POST /api/ops/jobs/{job_id}/replay
 
 最新 `sql/pixiv_archive.sql` 已为每张表、每个字段提供中文 COMMENT，
 适合直接在 DataGrip、Navicat 或 IDEA Database 查看。
-当前程序要求 `schema_version=6`，且只支持重新初始化的空数据库。
+当前程序要求 `schema_version=7`；新装使用最新 DDL，已有 v6 库通过 `sql/upgrades/v6_to_v7.sql` 升级。
+
+
+## 自动备份小说追更列表（v1.8，Schema v7）
+
+这是 Pixiv 小说合集页面的 **「加入追更列表」**，不是普通小说收藏夹。
+依赖有效的 `PIXIV_COOKIE`（通常包含 PHPSESSID）和已启动的 `sync`、`worker` 服务。
+
+启动同步源（默认每 6 小时重新扫描一次所有仍在追更的小说合集）：
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "http://127.0.0.1:18081/api/sync/sources/watchlist/novel?run_now=true&interval_seconds=21600"
+```
+
+可从 `GET /api/sync/sources` 取得同步源 ID，使用 `GET /api/sync/jobs/{job_id}` 查看扫描状态，或用 `POST /api/sync/sources/{id}/run?full=true` 手动触发。
+
+- 首次从 Pixiv Web `/ajax/watch_list/novel` 读取追更列表；以后每次都重新扫描旧合集，不能用普通收藏的增量边界跳过旧合集。
+- 通过现有合集发现服务遍历章节；已成功归档的章节不重复投递，新增或之前失败的章节进入 Redis 队列。
+- 取消追更后，该合集不再被后续扫描；本地已经归档的文件不会删除。
+- **这项功能需要现有数据库从 v6 升级至 v7。** 不要对有数据的库执行全量初始化 SQL。
+- 接口为未公开的 Pixiv Web AJAX，真实账号的结构仍需现场验证；如 Cookie 失效或响应结构变化，任务明确失败，不会假称全集完成。
+- 目前自动追更仅支持 **小说**；漫画追更列表和自动扫描所有关注作者尚未接入。

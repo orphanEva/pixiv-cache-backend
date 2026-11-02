@@ -29,6 +29,8 @@ def test_archive_schema_contract():
     )
     assert "remote_update_at DATETIME NULL" in sql
     assert f"VALUES (1, {EXPECTED_SCHEMA_VERSION})" in sql
+    assert "ENUM('author','bookmarks','watchlist')" in sql
+    assert "MODIFY COLUMN type ENUM('author','bookmarks','watchlist')" in Path("sql/upgrades/v6_to_v7.sql").read_text()
     for file_type in ("ugoira_zip", "ugoira_meta", "ugoira_mp4"):
         assert f"'{file_type}'" in sql
 
