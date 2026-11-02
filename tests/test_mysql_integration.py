@@ -856,3 +856,51 @@ async def test_mysql_watchlist_source_enum_preserves_other_source_types():
         finally:
             await session.execute(delete(SyncSource).where(SyncSource.id == source_id))
             await session.commit()
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_tag_relation_deduplicates_mysql_collation_equivalent_names():
+    """复现：MySQL utf8mb4_unicode_ci 把 Python 不同大小写标签解析成同一个 tag_id。
+
+    旧实现仅按 Python 标签名去重，会在后续 autoflush 插入重复 (work_id, tag_id)。
+    本测试用真实 MySQL 验证重复候选关系不会产生 1062。
+    """
+    work_id = "987651260"
+    label = "CaseFoldTag987651260"
+    async with SessionLocal() as session:
+        await session.execute(delete(PixivWork).where(PixivWork.id == work_id))
+        await session.execute(delete(Tag).where(Tag.name == label))
+        await session.commit()
+        try:
+            session.add(PixivWork(
+                id=work_id,
+                work_type=WorkType.NOVEL,
+                status=WorkStatus.ACTIVE,
+                title="MySQL collation regression",
+                author_id="1",
+                author_name="test",
+                metadata_json={},
+                version_token="1" * 64,
+            ))
+            await session.flush()
+            service = CacheService(session, FakePixiv(), redis_client=get_redis())
+            tags = [{"name": label}, {"name": label.lower()}, {"name": label}]
+            await service._sync_tags(work_id, tags)
+            await session.commit()
+
+            query = select(WorkTagRelation.tag_id).where(
+                WorkTagRelation.work_id == work_id
+            )
+            first = (await session.execute(query)).scalars().all()
+            assert len(first) == 1
+
+            # 重复运行也不能插入第二条 (work_id, tag_id)。
+            await service._sync_tags(work_id, tags)
+            await session.commit()
+            second = (await session.execute(query)).scalars().all()
+            assert second == first
+        finally:
+            await session.rollback()
+            await session.execute(delete(PixivWork).where(PixivWork.id == work_id))
+            await session.execute(delete(Tag).where(Tag.name == label))
+            await session.commit()
