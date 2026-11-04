@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.pixivpy_client import PixivPyClient
 from app.core.errors import PixivRemoteError
+from app.core.config import get_settings
 from app.db.session import get_session
 from app.models.work import WorkType
 from app.schemas.pixiv import HistoryResponse, WorkResponse
@@ -31,10 +32,11 @@ def raise_http(exc: PixivRemoteError) -> None:
 async def get_illust(
     pixiv_id: int,
     refresh: bool = Query(True, description="Check Pixiv for a newer version before returning local cache."),
+    bookmark_if_missing: bool = Query(True, description="Privately bookmark an uncached work before downloading; existing bookmarks are preserved."),
     session: AsyncSession = Depends(get_session),
 ):
     try:
-        return await service(session).get_illust(pixiv_id, refresh)
+        return await service(session).get_illust(pixiv_id, refresh, bookmark_if_missing=bookmark_if_missing and get_settings().pixiv_auto_bookmark_on_api_download)
     except PixivRemoteError as exc:
         raise_http(exc)
 
@@ -43,10 +45,11 @@ async def get_illust(
 async def get_novel(
     pixiv_id: int,
     refresh: bool = Query(True, description="Check Pixiv for a newer version before returning local cache."),
+    bookmark_if_missing: bool = Query(True, description="Privately bookmark an uncached work before downloading; existing bookmarks are preserved."),
     session: AsyncSession = Depends(get_session),
 ):
     try:
-        return await service(session).get_novel(pixiv_id, refresh)
+        return await service(session).get_novel(pixiv_id, refresh, bookmark_if_missing=bookmark_if_missing and get_settings().pixiv_auto_bookmark_on_api_download)
     except PixivRemoteError as exc:
         raise_http(exc)
 

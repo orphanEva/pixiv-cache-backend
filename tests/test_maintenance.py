@@ -11,7 +11,7 @@ class FakeLock:
     def __init__(self):
         self.released = False
 
-    async def acquire(self):
+    async def acquire(self, **kwargs):
         return True
 
     async def extend(self, ttl, replace_ttl=False):
@@ -19,6 +19,9 @@ class FakeLock:
 
     async def release(self):
         self.released = True
+
+    async def owned(self):
+        return not self.released
 
 
 class FakeRedis:
@@ -36,6 +39,9 @@ class FakeRedis:
     async def scan_iter(self, match=None, count=None):
         if self.active_writer:
             yield "pixiv-cache:illust:1"
+
+    async def eval(self, script, numkeys, *args):
+        return int(self.active_writer)
 
 
 @pytest.mark.asyncio

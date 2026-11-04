@@ -11,12 +11,12 @@ from sqlalchemy import update
 from app.clients.pixivpy_client import PixivPyClient
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.core.maintenance import maintenance_active
-from app.core.errors import is_retryable_archive_error
+from app.core.maintenance import maintenance_active, MaintenanceWriter
+from app.core.errors import PixivUnavailableError, is_retryable_archive_error
 from app.core.redis_client import close_redis, get_redis
 from app.core.schema_version import ensure_schema_version
 from app.db.session import SessionLocal, engine
-from app.models.work import SeriesMember, WorkType
+from app.models.work import SeriesMember, WorkType, normalize_work_kind
 from app.services.archive_jobs import ArchiveJobQueue
 from app.services.cache_service import CacheService
 from app.services.work_sources import record_work_sources
@@ -91,20 +91,32 @@ class ArchiveWorker:
             },
         )
         lease_task = asyncio.create_task(self._touch_job_lease(stream_id))
+        acknowledge = False
         try:
-            async with SessionLocal() as session:
+            async with MaintenanceWriter(self.redis), SessionLocal() as session:
                 service = CacheService(session, self.client, redis_client=self.redis)
                 result = await service._get(
                     int(job["pixiv_id"]),
                     WorkType(job["kind"]),
                     refresh=True,
                     bypass_ttl=bool(job["force_refresh"]),
+                    bookmark_if_missing=bool(job.get("bookmark_if_missing")),
                 )
+                if bool(job["force_refresh"]) and (
+                    result.source.startswith("local-stale-")
+                    or result.source == "local-lock-timeout"
+                ):
+                    # A readable local copy is useful to HTTP readers, but does
+                    # not fulfill a queued request to validate the remote work.
+                    raise PixivUnavailableError(
+                        "Remote verification did not complete; retry the archive check"
+                    )
                 latest_job = await self.queue.mark_finalizing(job_id)
                 await record_work_sources(
                     session,
                     str(result.pixiv_id),
                     (latest_job or job).get("source_ids") or [],
+                    work_kind=normalize_work_kind(job["kind"]),
                 )
             await self.queue.mark_succeeded(
                 job_id,
@@ -112,6 +124,7 @@ class ArchiveWorker:
             )
             await self._update_series_member(job, "archived")
             logger.info("archive_job_succeeded", extra={"job_id": job_id})
+            acknowledge = True
         except Exception as exc:
             retryable = is_retryable_archive_error(exc)
             attempts = int(job.get("attempts") or 0)
@@ -148,24 +161,28 @@ class ArchiveWorker:
                     },
                     exc_info=True,
                 )
+                acknowledge = True
         finally:
             lease_task.cancel()
             try:
                 await lease_task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.exception("archive_job_lease_failed", extra={"job_id": job_id})
+        if acknowledge:
             await self.queue.ack(stream_id)
 
     async def _update_series_member(self, job: dict, status: str, exc: Exception | None = None) -> None:
         """归档终态回写到合集成员记录；不记录包含凭据的上游异常正文。"""
         try:
-            async with SessionLocal() as session:
+            async with MaintenanceWriter(self.redis), SessionLocal() as session:
                 await session.execute(
                     update(SeriesMember)
                     .where(
                         SeriesMember.work_id == str(job["pixiv_id"]),
                         SeriesMember.series_type == (
-                            "novel" if job["kind"] == "novel" else "manga"
+                            "novel" if normalize_work_kind(job["kind"]) == "novel" else "manga"
                         ),
                     )
                     .values(

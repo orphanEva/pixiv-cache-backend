@@ -149,9 +149,9 @@ async def test_series_namespaces_and_composite_foreign_keys():
         # whereas other MySQL drivers may surface IntegrityError.
         with pytest.raises((IntegrityError, OperationalError)):
             await session.execute(text(
-                "INSERT INTO works (id,type,status,series_type,series_id,title,author_id,"
+                "INSERT INTO works (work_kind,id,type,status,series_type,series_id,title,author_id,"
                 "author_name,page_count,version_token) VALUES "
-                "('9876500001','novel','active','manga',:sid,'bad','1','A',1,:token)"
+                "('novel','9876500001','novel','active','manga',:sid,'bad','1','A',1,:token)"
             ), {"sid": shared, "token": "a" * 64})
             await session.commit()
         await session.rollback()
@@ -188,7 +188,7 @@ async def test_mysql_accepts_ugoira_archive_file_types():
         await session.flush()
 
         version = PixivVersion(
-            work_id=work_id,
+            work_kind="illust", work_id=work_id,
             version_no=1,
             version_token="f" * 64,
             title="ugoira",
@@ -211,7 +211,7 @@ async def test_mysql_accepts_ugoira_archive_file_types():
                 size_bytes=1,
             ))
             session.add(CurrentFile(
-                work_id=work_id,
+                work_kind="illust", work_id=work_id,
                 page_index=index,
                 file_type=file_type,
                 local_path=path,
@@ -619,11 +619,11 @@ async def test_library_api_service_filters_sources_history_and_stats(tmp_path: P
             await record_work_sources(
                 session,
                 str(work_id),
-                [source.id],
+                [source.id], work_kind="novel",
             )
             relation = await session.get(
                 WorkSource,
-                {"work_id": str(work_id), "source_id": source.id},
+                {"work_kind": "novel", "work_id": str(work_id), "source_id": source.id},
             )
             assert relation is not None
 
@@ -868,11 +868,14 @@ async def test_tag_relation_deduplicates_mysql_collation_equivalent_names():
     work_id = "987651260"
     label = "CaseFoldTag987651260"
     async with SessionLocal() as session:
-        await session.execute(delete(PixivWork).where(PixivWork.id == work_id))
+        await session.execute(delete(PixivWork).where(
+            PixivWork.work_kind == "novel", PixivWork.id == work_id,
+        ))
         await session.execute(delete(Tag).where(Tag.name == label))
         await session.commit()
         try:
             session.add(PixivWork(
+                work_kind="novel",
                 id=work_id,
                 work_type=WorkType.NOVEL,
                 status=WorkStatus.ACTIVE,
@@ -885,22 +888,24 @@ async def test_tag_relation_deduplicates_mysql_collation_equivalent_names():
             await session.flush()
             service = CacheService(session, FakePixiv(), redis_client=get_redis())
             tags = [{"name": label}, {"name": label.lower()}, {"name": label}]
-            await service._sync_tags(work_id, tags)
+            await service._sync_tags(work_id, tags, work_kind="novel")
             await session.commit()
 
             query = select(WorkTagRelation.tag_id).where(
-                WorkTagRelation.work_id == work_id
+                WorkTagRelation.work_kind == "novel", WorkTagRelation.work_id == work_id,
             )
             first = (await session.execute(query)).scalars().all()
             assert len(first) == 1
 
             # 重复运行也不能插入第二条 (work_id, tag_id)。
-            await service._sync_tags(work_id, tags)
+            await service._sync_tags(work_id, tags, work_kind="novel")
             await session.commit()
             second = (await session.execute(query)).scalars().all()
             assert second == first
         finally:
             await session.rollback()
-            await session.execute(delete(PixivWork).where(PixivWork.id == work_id))
+            await session.execute(delete(PixivWork).where(
+                PixivWork.work_kind == "novel", PixivWork.id == work_id,
+            ))
             await session.execute(delete(Tag).where(Tag.name == label))
             await session.commit()

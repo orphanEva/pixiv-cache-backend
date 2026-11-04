@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -21,6 +22,7 @@ class SyncSourcePatch(BaseModel):
     enabled: bool | None = None
     include_illust: bool | None = None
     include_novel: bool | None = None
+    expand_series: bool | None = None
     interval_seconds: int | None = Field(default=None, ge=300)
 
 
@@ -38,12 +40,15 @@ def _source_dict(source: SyncSource) -> dict:
         "id": source.id,
         "type": source.source_type.value,
         "remote_user_id": source.remote_user_id,
+        "account_id": source.account_id,
         "restrict": source.restrict_mode.value,
         "include_illust": source.include_illust,
         "include_novel": source.include_novel,
+        "expand_series": source.expand_series,
         "enabled": source.enabled,
         "interval_seconds": source.interval_seconds,
         "frontier": source.frontier_json or {},
+        "scan_state": source.scan_state_json,
         "next_run_at": source.next_run_at,
         "last_run_at": source.last_run_at,
         "last_success_at": source.last_success_at,
@@ -63,7 +68,10 @@ async def _upsert_source(
     include_novel: bool,
     interval_seconds: int,
     run_now: bool,
+    expand_series: bool = False,
 ):
+    if not include_illust and not include_novel:
+        raise HTTPException(400, "At least one work type must be included")
     existing = (
         await session.execute(
             select(SyncSource).where(
@@ -73,6 +81,7 @@ async def _upsert_source(
             )
         )
     ).scalar_one_or_none()
+    rescan_required = False
     if existing is None:
         existing = SyncSource(
             source_type=source_type,
@@ -80,14 +89,24 @@ async def _upsert_source(
             restrict_mode=restrict,
             include_illust=include_illust,
             include_novel=include_novel,
+            expand_series=expand_series,
             enabled=True,
             interval_seconds=interval_seconds,
             next_run_at=now_utc() if run_now else now_utc() + timedelta(seconds=interval_seconds),
         )
         session.add(existing)
     else:
+        # A changed content selection requires a new scan rather than resuming a
+        # cursor/frontier captured under different subscription options.
+        rescan_required = (not existing.enabled or existing.include_illust != include_illust
+                           or existing.include_novel != include_novel
+                           or existing.expand_series != expand_series)
+        if rescan_required:
+            existing.scan_state_json = None
+            existing.frontier_json = None
         existing.include_illust = include_illust
         existing.include_novel = include_novel
+        existing.expand_series = expand_series
         existing.interval_seconds = interval_seconds
         existing.enabled = True
         if run_now:
@@ -96,8 +115,8 @@ async def _upsert_source(
     await session.refresh(existing)
 
     payload = _source_dict(existing)
-    if run_now:
-        payload["job"] = await SyncJobQueue(get_redis()).enqueue(existing.id)
+    if existing.enabled and (run_now or rescan_required):
+        payload["job"] = await SyncJobQueue(get_redis()).enqueue(existing.id, full=rescan_required)
     return payload
 
 
@@ -128,6 +147,7 @@ async def upsert_bookmark_source(
     restrict: SyncRestrict = Query(SyncRestrict.PUBLIC),
     include_illust: bool = Query(True),
     include_novel: bool = Query(True),
+    expand_series: bool = Query(False),
     interval_seconds: int = Query(21600, ge=300),
     run_now: bool = Query(True),
     session: AsyncSession = Depends(get_session),
@@ -141,6 +161,42 @@ async def upsert_bookmark_source(
         include_novel=include_novel,
         interval_seconds=interval_seconds,
         run_now=run_now,
+        expand_series=expand_series,
+    )
+
+
+@router.post("/sources/series/{series_type}/{series_id}")
+async def upsert_series_source(
+    series_type: Literal["novel", "manga"],
+    series_id: int,
+    interval_seconds: int = Query(21600, ge=300),
+    run_now: bool = Query(True),
+    session: AsyncSession = Depends(get_session),
+):
+    if series_id <= 0:
+        raise HTTPException(400, "series_id must be positive")
+    return await _upsert_source(
+        session,
+        source_type=SyncSourceType.NOVEL_SERIES if series_type == "novel" else SyncSourceType.MANGA_SERIES,
+        remote_user_id=str(series_id), restrict=SyncRestrict.PUBLIC,
+        include_illust=series_type == "manga", include_novel=series_type == "novel",
+        interval_seconds=interval_seconds, run_now=run_now,
+    )
+
+
+@router.post("/sources/followed-series")
+async def upsert_followed_series_source(
+    include_novel: bool = Query(True),
+    include_manga: bool = Query(True),
+    interval_seconds: int = Query(21600, ge=300),
+    run_now: bool = Query(True),
+    session: AsyncSession = Depends(get_session),
+):
+    """Import the PIXIV_COOKIE account's watched series and keep discovering new ones."""
+    return await _upsert_source(
+        session, source_type=SyncSourceType.FOLLOWED_SERIES, remote_user_id="self",
+        restrict=SyncRestrict.PUBLIC, include_illust=include_manga, include_novel=include_novel,
+        interval_seconds=interval_seconds, run_now=run_now,
     )
 
 
@@ -194,13 +250,30 @@ async def patch_sync_source(
     if source is None:
         raise HTTPException(404, "Sync source not found")
     data = patch.model_dump(exclude_none=True)
+    if data.get("expand_series") and source.source_type != SyncSourceType.BOOKMARKS:
+        raise HTTPException(400, "expand_series is only supported for bookmark sources")
+    if source.source_type == SyncSourceType.WATCHLIST and (
+        data.get("include_illust", source.include_illust) or not data.get("include_novel", source.include_novel)
+    ):
+        raise HTTPException(400, "Novel watchlist sources must include novels only")
+    if not data.get("include_illust", source.include_illust) and not data.get("include_novel", source.include_novel):
+        raise HTTPException(400, "At least one work type must be included")
+    rescan_required = (not source.enabled and data.get("enabled") is True) or any(
+        key in data and data[key] != getattr(source, key)
+        for key in ("include_illust", "include_novel", "expand_series"))
+    if rescan_required:
+        source.scan_state_json = None
+        source.frontier_json = None
     for key, value in data.items():
         setattr(source, key, value)
     if source.enabled and source.next_run_at is None:
         source.next_run_at = now_utc()
     await session.commit()
     await session.refresh(source)
-    return _source_dict(source)
+    payload = _source_dict(source)
+    if source.enabled and rescan_required:
+        payload["job"] = await SyncJobQueue(get_redis()).enqueue(source.id, full=True)
+    return payload
 
 
 @router.delete("/sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -228,6 +301,8 @@ async def run_sync_source(
     source = await session.get(SyncSource, source_id)
     if source is None:
         raise HTTPException(404, "Sync source not found")
+    if not source.enabled:
+        raise HTTPException(409, "Enable this sync source before running it")
     return await SyncJobQueue(get_redis()).enqueue(source_id, full=full)
 
 

@@ -5,11 +5,12 @@ import math
 from pathlib import Path
 from urllib.parse import quote
 
-from sqlalchemy import case, exists, func, or_, select
+from sqlalchemy import case, exists, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
+from app.core.errors import AmbiguousWorkError
 from app.core.security import cache_read_allowed
 from app.models.work import (
     CurrentFile,
@@ -22,7 +23,7 @@ from app.models.work import (
     WorkSource,
     WorkStatus,
     WorkTagRelation,
-    WorkType,
+    WorkType, normalize_work_kind,
 )
 from app.services.cache_service import utc_naive
 from app.schemas.library import (
@@ -49,6 +50,17 @@ class LibraryService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.settings = get_settings()
+
+    async def resolve_work(self, pixiv_id: int, kind: WorkType | str | None = None) -> PixivWork | None:
+        stmt = select(PixivWork).where(PixivWork.id == str(pixiv_id))
+        if kind is not None:
+            stmt = stmt.where(PixivWork.work_kind == normalize_work_kind(kind))
+        rows = (await self.session.execute(stmt.options(
+            selectinload(PixivWork.current_files),
+        ).limit(2))).scalars().all()
+        if len(rows) > 1:
+            raise AmbiguousWorkError("This ID exists as both novel and illustration; specify kind=novel or kind=illust")
+        return rows[0] if rows else None
 
     @staticmethod
     def _pagination(page: int, page_size: int, total: int) -> PaginationMeta:
@@ -126,6 +138,7 @@ class LibraryService:
                 exists(
                     select(1).where(
                         WorkSource.work_id == PixivWork.id,
+                        WorkSource.work_kind == PixivWork.work_kind,
                         WorkSource.source_id == source_id,
                     )
                 )
@@ -143,6 +156,7 @@ class LibraryService:
                             .join(Tag, Tag.id == WorkTagRelation.tag_id)
                             .where(
                                 WorkTagRelation.work_id == PixivWork.id,
+                                WorkTagRelation.work_kind == PixivWork.work_kind,
                                 Tag.name == name,
                             )
                         )
@@ -155,6 +169,7 @@ class LibraryService:
                         .join(Tag, Tag.id == WorkTagRelation.tag_id)
                         .where(
                             WorkTagRelation.work_id == PixivWork.id,
+                                WorkTagRelation.work_kind == PixivWork.work_kind,
                             Tag.name.in_(normalized_tags),
                         )
                     )
@@ -179,20 +194,20 @@ class LibraryService:
             select(PixivWork)
             .where(*conditions)
             .options(selectinload(PixivWork.current_files))
-            .order_by(sort_col.is_(None), direction, PixivWork.id.desc())
+            .order_by(sort_col.is_(None), direction, PixivWork.id.desc(), PixivWork.work_kind.asc())
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
         works = (await self.session.execute(stmt)).scalars().all()
-        ids = [work.id for work in works]
+        ids = [(work.work_kind, work.id) for work in works]
         tag_map = await self._tag_map(ids)
         source_map = await self._source_id_map(ids)
 
         items = [
             self._summary(
                 work,
-                tags=tag_map.get(work.id, []),
-                source_ids=source_map.get(work.id, []),
+                tags=tag_map.get((work.work_kind, work.id), []),
+                source_ids=source_map.get((work.work_kind, work.id), []),
             )
             for work in works
         ]
@@ -205,22 +220,17 @@ class LibraryService:
         self,
         pixiv_id: int,
         *,
+        kind: WorkType | str | None = None,
         include_content: bool = False,
         include_raw_meta: bool = False,
         include_paths: bool = False,
     ) -> LibraryWorkDetail | None:
-        work = (
-            await self.session.execute(
-                select(PixivWork)
-                .where(PixivWork.id == str(pixiv_id))
-                .options(selectinload(PixivWork.current_files))
-            )
-        ).scalar_one_or_none()
+        work = await self.resolve_work(pixiv_id, kind)
         if work is None:
             return None
 
-        tags = (await self._tag_map([work.id])).get(work.id, [])
-        sources = (await self._source_map([work.id])).get(work.id, [])
+        tags = (await self._tag_map([(work.work_kind, work.id)])).get((work.work_kind, work.id), [])
+        sources = (await self._source_map([(work.work_kind, work.id)])).get((work.work_kind, work.id), [])
         accessible = cache_read_allowed(work.status.value)
         summary = self._summary(
             work,
@@ -263,17 +273,18 @@ class LibraryService:
         self,
         pixiv_id: int,
         *,
+        kind: WorkType | str | None = None,
         include_content: bool = False,
         include_raw_meta: bool = False,
         include_paths: bool = False,
     ) -> LibraryHistory | None:
-        work = await self.session.get(PixivWork, str(pixiv_id))
+        work = await self.resolve_work(pixiv_id, kind)
         if work is None:
             return None
         versions = (
             await self.session.execute(
                 select(PixivVersion)
-                .where(PixivVersion.work_id == work.id)
+                .where(PixivVersion.work_id == work.id, PixivVersion.work_kind == work.work_kind)
                 .options(selectinload(PixivVersion.assets))
                 .order_by(PixivVersion.version_no.desc())
             )
@@ -301,11 +312,12 @@ class LibraryService:
         pixiv_id: int,
         version_no: int,
         *,
+        kind: WorkType | str | None = None,
         include_content: bool = False,
         include_raw_meta: bool = False,
         include_paths: bool = False,
     ) -> LibraryVersion | None:
-        work = await self.session.get(PixivWork, str(pixiv_id))
+        work = await self.resolve_work(pixiv_id, kind)
         if work is None:
             return None
         version = (
@@ -313,6 +325,7 @@ class LibraryService:
                 select(PixivVersion)
                 .where(
                     PixivVersion.work_id == work.id,
+                    PixivVersion.work_kind == work.work_kind,
                     PixivVersion.version_no == version_no,
                 )
                 .options(selectinload(PixivVersion.assets))
@@ -333,15 +346,10 @@ class LibraryService:
         self,
         pixiv_id: int,
         *,
+        kind: WorkType | str | None = None,
         verify_hash: bool = False,
     ) -> dict | None:
-        work = (
-            await self.session.execute(
-                select(PixivWork)
-                .where(PixivWork.id == str(pixiv_id))
-                .options(selectinload(PixivWork.current_files))
-            )
-        ).scalar_one_or_none()
+        work = await self.resolve_work(pixiv_id, kind)
         if work is None:
             return None
         root = self.settings.storage_root.resolve()
@@ -747,52 +755,54 @@ class LibraryService:
             source_links=int(source_links),
         )
 
-    async def _tag_map(self, work_ids: list[str]) -> dict[str, list[LibraryTagRef]]:
+    async def _tag_map(self, work_ids: list[tuple[str, str]]) -> dict[tuple[str, str], list[LibraryTagRef]]:
         if not work_ids:
             return {}
         rows = (
             await self.session.execute(
                 select(
+                    WorkTagRelation.work_kind,
                     WorkTagRelation.work_id,
                     Tag.name,
                     Tag.translated_name,
                 )
                 .join(Tag, Tag.id == WorkTagRelation.tag_id)
-                .where(WorkTagRelation.work_id.in_(work_ids))
+                .where(tuple_(WorkTagRelation.work_kind, WorkTagRelation.work_id).in_(work_ids))
                 .order_by(WorkTagRelation.work_id, Tag.name)
             )
         ).all()
-        result: dict[str, list[LibraryTagRef]] = {}
-        for work_id, name, translated in rows:
-            result.setdefault(work_id, []).append(
+        result: dict[tuple[str, str], list[LibraryTagRef]] = {}
+        for work_kind, work_id, name, translated in rows:
+            result.setdefault((work_kind, work_id), []).append(
                 LibraryTagRef(name=name, translated_name=translated)
             )
         return result
 
-    async def _source_id_map(self, work_ids: list[str]) -> dict[str, list[int]]:
+    async def _source_id_map(self, work_ids: list[tuple[str, str]]) -> dict[tuple[str, str], list[int]]:
         if not work_ids:
             return {}
         rows = (
             await self.session.execute(
-                select(WorkSource.work_id, WorkSource.source_id)
-                .where(WorkSource.work_id.in_(work_ids))
+                select(WorkSource.work_kind, WorkSource.work_id, WorkSource.source_id)
+                .where(tuple_(WorkSource.work_kind, WorkSource.work_id).in_(work_ids))
                 .order_by(WorkSource.work_id, WorkSource.source_id)
             )
         ).all()
-        result: dict[str, list[int]] = {}
-        for work_id, source_id in rows:
-            result.setdefault(work_id, []).append(int(source_id))
+        result: dict[tuple[str, str], list[int]] = {}
+        for work_kind, work_id, source_id in rows:
+            result.setdefault((work_kind, work_id), []).append(int(source_id))
         return result
 
     async def _source_map(
         self,
-        work_ids: list[str],
-    ) -> dict[str, list[LibrarySourceRef]]:
+        work_ids: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], list[LibrarySourceRef]]:
         if not work_ids:
             return {}
         rows = (
             await self.session.execute(
                 select(
+                    WorkSource.work_kind,
                     WorkSource.work_id,
                     WorkSource.source_id,
                     SyncSource.source_type,
@@ -802,13 +812,13 @@ class LibraryService:
                     WorkSource.last_seen_at,
                 )
                 .join(SyncSource, SyncSource.id == WorkSource.source_id)
-                .where(WorkSource.work_id.in_(work_ids))
+                .where(tuple_(WorkSource.work_kind, WorkSource.work_id).in_(work_ids))
                 .order_by(WorkSource.work_id, WorkSource.source_id)
             )
         ).all()
-        result: dict[str, list[LibrarySourceRef]] = {}
+        result: dict[tuple[str, str], list[LibrarySourceRef]] = {}
         for row in rows:
-            result.setdefault(row.work_id, []).append(
+            result.setdefault((row.work_kind, row.work_id), []).append(
                 LibrarySourceRef(
                     source_id=int(row.source_id),
                     type=row.source_type,
@@ -868,6 +878,14 @@ class LibraryService:
     ) -> LibraryFile:
         path = Path(item.local_path)
         encoded = quote(path.name)
+        media_kind = None
+        try:
+            parts = path.resolve().relative_to(self.settings.storage_root.resolve()).parts
+            if (len(parts) == 5 and parts[1:4] == (str(work.id), "versions", str(version_no))
+                    and normalize_work_kind(parts[0]) == normalize_work_kind(work.work_type)):
+                media_kind = parts[0]
+        except ValueError:
+            pass
         return LibraryFile(
             page_index=item.page_index,
             file_type=item.file_type,
@@ -875,9 +893,9 @@ class LibraryService:
             sha256=item.sha256,
             filename=path.name,
             download_url=(
-                f"/media/{work.work_type.value}/{work.id}/versions/"
+                f"/media/{media_kind}/{work.id}/versions/"
                 f"{version_no}/{encoded}"
-                if accessible
+                if accessible and media_kind is not None
                 else None
             ),
             local_path=str(path) if include_path else None,

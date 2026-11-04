@@ -103,13 +103,13 @@ async def test_cache_create_validate_update_stale_and_immutable_history(tmp_path
         v1 = await service.get_novel(123)
         assert v1.version == 1 and v1.source == "remote-created"
         assert len(session.work.current_files) == 1
-        assert session.work.current_files[0].local_path.endswith("/versions/1/novel.txt")
+        assert Path(session.work.current_files[0].local_path).parts[-3:] == ("versions", "1", "novel.txt")
 
         same = await service.get_novel(123)
         assert same.version == 1 and same.source == "local-validated"
         v2 = await service.get_novel(123)
         assert v2.version == 2 and v2.title == "demo2"
-        assert session.work.current_files[0].local_path.endswith("/versions/2/novel.txt")
+        assert Path(session.work.current_files[0].local_path).parts[-3:] == ("versions", "2", "novel.txt")
         old = await service.get_version(123, WorkType.NOVEL, 1)
         assert old.title == "demo" and old.version == 1
         assert (tmp_path / "novel/123/versions/1/novel.txt").read_text() == "v1"

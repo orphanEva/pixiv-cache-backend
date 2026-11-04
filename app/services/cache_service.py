@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import asyncio
 from pathlib import Path
 import logging
 import shutil
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -23,6 +25,7 @@ from app.core.errors import (
 from app.models.work import (
     CurrentFile, PixivAsset, PixivVersion, PixivWork, Series, SeriesMember,
     Tag, WorkStatus, WorkTagRelation, WorkType,
+    normalize_work_kind, work_identity,
 )
 from app.schemas.pixiv import (
     AssetResponse, HistoryResponse, RemoteSnapshot, VersionSummary, WorkResponse,
@@ -55,11 +58,11 @@ class CacheService:
             redis_client = get_redis()
         self.redis = redis_client
 
-    async def get_illust(self, pixiv_id: int, refresh: bool = True) -> WorkResponse:
-        return await self._get(pixiv_id, WorkType.ILLUST, refresh)
+    async def get_illust(self, pixiv_id: int, refresh: bool = True, *, bookmark_if_missing: bool = False) -> WorkResponse:
+        return await self._get(pixiv_id, WorkType.ILLUST, refresh, bookmark_if_missing=bookmark_if_missing)
 
-    async def get_novel(self, pixiv_id: int, refresh: bool = True) -> WorkResponse:
-        return await self._get(pixiv_id, WorkType.NOVEL, refresh)
+    async def get_novel(self, pixiv_id: int, refresh: bool = True, *, bookmark_if_missing: bool = False) -> WorkResponse:
+        return await self._get(pixiv_id, WorkType.NOVEL, refresh, bookmark_if_missing=bookmark_if_missing)
 
     async def get_history(self, pixiv_id: int, work_type: WorkType) -> HistoryResponse:
         work = await self._load(pixiv_id, work_type)
@@ -83,7 +86,8 @@ class CacheService:
             raise PixivNotFoundError("Archived version does not exist")
         return self._to_response(work, "local-history", version)
 
-    async def _get(self, pixiv_id: int, work_type: WorkType, refresh: bool, bypass_ttl: bool = False) -> WorkResponse:
+    async def _get(self, pixiv_id: int, work_type: WorkType, refresh: bool, bypass_ttl: bool = False, bookmark_if_missing: bool = False) -> WorkResponse:
+        work_kind, work_id = work_identity(work_type, pixiv_id)
         work = await self._load(pixiv_id, work_type)
         if work and not refresh:
             self._require_local_access(work)
@@ -93,10 +97,14 @@ class CacheService:
             if (now_utc() - utc_naive(work.last_checked_at)).total_seconds() < self.settings.remote_check_ttl_seconds:
                 return self._to_response(work, "local-recently-validated")
 
+        # End the optimistic read before waiting for the distributed lock.
+        # MySQL REPEATABLE READ would otherwise retain a snapshot from before
+        # another writer committed, including when checking orphan ownership.
+        await self.session.rollback()
         await require_writes_allowed(self.redis)
         lock = RenewingRedisLock(
             self.redis,
-            f"{self.settings.cache_lock_prefix}{work_type.value}:{pixiv_id}",
+            f"{self.settings.cache_lock_prefix}{work_kind}:{work_id}",
             ttl_seconds=self.settings.lock_ttl_seconds,
             wait_seconds=self.settings.lock_wait_seconds,
         )
@@ -116,7 +124,18 @@ class CacheService:
                 self._require_local_access(work)
                 return self._to_response(work, "local")
             try:
+                if work is None and bookmark_if_missing:
+                    # User-requested archives only: automatic author/source scans
+                    # must never silently bookmark the entire remote library.
+                    # Do this before fetching novel text or downloading media.
+                    await self.client.ensure_bookmarked(
+                        pixiv_id, work_type,
+                        restrict=self.settings.pixiv_auto_bookmark_restrict,
+                    )
+                    lock.ensure_alive()
                 snapshot = await self._remote_snapshot(pixiv_id, work_type)
+                if work_identity(snapshot.work_type, snapshot.pixiv_id) != (work_kind, work_id):
+                    raise ValueError("Remote work identity does not match the requested work")
             except PixivNotFoundError as exc:
                 await self._mark_remote_status(work, WorkStatus.DELETED, str(exc))
                 raise
@@ -128,12 +147,12 @@ class CacheService:
                 raise
             except PixivUnavailableError as exc:
                 await self._mark_remote_status(work, WorkStatus.UNAVAILABLE, str(exc))
-                if work and self.settings.serve_stale_on_remote_unavailable:
+                if work and cache_read_allowed(work.status.value) and self.settings.serve_stale_on_remote_unavailable:
                     return self._to_response(work, "local-stale-remote-unavailable")
                 raise
             except PixivRemoteError as exc:
                 await self._mark_remote_status(work, WorkStatus.ERROR, str(exc))
-                if work and self.settings.serve_stale_on_remote_unavailable:
+                if work and cache_read_allowed(work.status.value) and self.settings.serve_stale_on_remote_unavailable:
                     return self._to_response(work, "local-stale-remote-error")
                 raise
 
@@ -183,7 +202,7 @@ class CacheService:
                     await self._mark_remote_status(
                         work, WorkStatus.UNAVAILABLE, str(exc)
                     )
-                    if self.settings.serve_stale_on_remote_unavailable:
+                    if cache_read_allowed(work.status.value) and self.settings.serve_stale_on_remote_unavailable:
                         return self._to_response(
                             work, "local-stale-deep-check-unavailable"
                         )
@@ -200,6 +219,12 @@ class CacheService:
                     work.series_order = snapshot.series_order
                 work.status = WorkStatus.ACTIVE
                 work.status_reason = None
+                # Metadata can change independently of the content fingerprint.
+                work.x_restrict = snapshot.x_restrict
+                work.is_ai = snapshot.is_ai
+                work.author_id = str(snapshot.author_id or 0)
+                work.author_name = (snapshot.author_name or "")[:128]
+                work.metadata_json = snapshot.metadata
                 work.last_checked_at = now_utc()
                 lock.ensure_alive()
                 await self.session.commit()
@@ -215,16 +240,30 @@ class CacheService:
             new_no = 1 if work is None else work.current_version_no + 1
             storage_path = ""
             committed = False
+            commit_started = False
             try:
                 # Store files in immutable per-version directories. work_files
                 # is merely a DB pointer to current paths, never a file move.
+                target = self.storage.version_dir(snapshot.work_type, pixiv_id, new_no)
+                if target.exists():
+                    registered = (await self.session.execute(
+                        select(PixivVersion.id).where(
+                            PixivVersion.work_kind == work_kind,
+                            PixivVersion.work_id == str(pixiv_id),
+                            PixivVersion.version_no == new_no,
+                        )
+                    )).scalar_one_or_none()
+                    if registered is not None:
+                        raise PixivUnavailableError("Archive version already committed; retry with a fresh transaction")
+                    lock.ensure_alive()
+                    self.storage.quarantine_uncommitted_version(snapshot.work_type, pixiv_id, new_no)
                 storage_path, assets = await self.storage.materialize(snapshot, new_no)
                 now = now_utc()
                 meta = snapshot.metadata
                 # Series must exist BEFORE any pending work can autoflush.
                 await self._sync_series(snapshot)
                 if work is None:
-                    work = PixivWork(id=str(pixiv_id), work_type=snapshot.work_type)
+                    work = PixivWork(work_kind=work_kind, id=work_id, work_type=snapshot.work_type)
                     self.session.add(work)
                 work.status = WorkStatus.ACTIVE
                 work.status_reason = None
@@ -257,7 +296,7 @@ class CacheService:
                 await self.session.flush()
 
                 version = PixivVersion(
-                    work_id=str(pixiv_id), version_no=new_no,
+                    work_kind=work_kind, work_id=work_id, version_no=new_no,
                     version_token=snapshot.version_token, title=snapshot.title[:255],
                     caption=snapshot.caption, tags_snapshot=snapshot.tags,
                     remote_updated_at=utc_naive(snapshot.updated_at),
@@ -274,22 +313,30 @@ class CacheService:
                         size_bytes=item["size_bytes"], remote_url=item["remote_url"],
                     ))
 
-                await self.session.execute(delete(CurrentFile).where(CurrentFile.work_id == str(pixiv_id)))
+                await self.session.execute(delete(CurrentFile).where(
+                    CurrentFile.work_kind == work_kind, CurrentFile.work_id == work_id))
                 for item in assets:
                     self.session.add(CurrentFile(
-                        work_id=str(pixiv_id), page_index=item["page_index"],
+                        work_kind=work_kind, work_id=work_id, page_index=item["page_index"],
                         file_type=item.get("file_type", "novel_txt" if snapshot.work_type == WorkType.NOVEL else "image"),
                         local_path=item["local_path"], sha256=item["sha256"],
                         size_bytes=item["size_bytes"],
                     ))
-                await self._sync_tags(str(pixiv_id), snapshot.tags)
+                await self._sync_tags(work_id, snapshot.tags, work_kind=work_kind)
                 lock.ensure_alive()
+                commit_started = True
                 await self.session.commit()
                 committed = True
+            except asyncio.CancelledError:
+                # Cancellation during COMMIT can leave its outcome uncertain.
+                # Preserve materialized files; the next locked attempt checks DB
+                # ownership before quarantining an uncommitted version.
+                await self.session.rollback()
+                raise
             except Exception:
                 if not committed:
                     await self.session.rollback()
-                    if storage_path:
+                    if storage_path and not commit_started:
                         shutil.rmtree(Path(storage_path), ignore_errors=True)
                 raise
             work = await self._load(pixiv_id, work_type)
@@ -329,8 +376,10 @@ class CacheService:
             if series_info.get("published_total") is not None:
                 series.published_total = int(series_info["published_total"])
 
-    async def _sync_tags(self, work_id: str, tags: list[dict]) -> None:
-        await self.session.execute(delete(WorkTagRelation).where(WorkTagRelation.work_id == work_id))
+    async def _sync_tags(self, work_id: str, tags: list[dict], *, work_kind: str) -> None:
+        work_kind = normalize_work_kind(work_kind)
+        await self.session.execute(delete(WorkTagRelation).where(
+            WorkTagRelation.work_kind == work_kind, WorkTagRelation.work_id == work_id))
         if not tags:
             return
         # A separately committed tag dictionary survives individual work updates;
@@ -348,21 +397,32 @@ class CacheService:
                 self.session.add(record)
                 await self.session.flush()
                 tag_id = record.id
-            # MySQL 默认 utf8mb4_unicode_ci 不区分大小写和部分重音：
-            # 不同 Python 字符串可能查询到同一个 Tag.id，必须按数据库 ID 去重。
+            # Database collations can resolve distinct Python strings to the
+            # same tag (e.g. MySQL utf8mb4_unicode_ci case/accent equivalence).
             tag_ids.add(int(tag_id))
 
         if tag_ids:
-            # 原子幂等写入，避免 SQLAlchemy 后续 autoflush 才因重复联合主键失败。
-            stmt = mysql_insert(WorkTagRelation).values(
-                [{"work_id": work_id, "tag_id": tid} for tid in sorted(tag_ids)]
-            )
-            await self.session.execute(
-                stmt.on_duplicate_key_update(tag_id=stmt.inserted.tag_id)
-            )
+            values = [{"work_kind": work_kind, "work_id": work_id, "tag_id": tag_id}
+                      for tag_id in sorted(tag_ids)]
+            dialect = self.session.get_bind().dialect.name
+            if dialect in {"mysql", "mariadb"}:
+                statement = mysql_insert(WorkTagRelation).values(values)
+                statement = statement.on_duplicate_key_update(tag_id=statement.inserted.tag_id)
+            elif dialect == "sqlite":
+                statement = sqlite_insert(WorkTagRelation).values(values).on_conflict_do_nothing(
+                    index_elements=["work_kind", "work_id", "tag_id"],
+                )
+            else:
+                for value in values:
+                    self.session.add(WorkTagRelation(**value))
+                return
+            await self.session.execute(statement)
 
     async def _mark_remote_status(self, work: PixivWork | None, status: WorkStatus, reason: str) -> None:
         if work is None:
+            return
+        if status in (WorkStatus.UNAVAILABLE, WorkStatus.ERROR) and not cache_read_allowed(work.status.value):
+            # A timeout is not evidence that previous access revocation was lifted.
             return
         work.status = status
         work.status_reason = reason[:1000]
@@ -370,14 +430,14 @@ class CacheService:
         await self.session.commit()
 
     async def _remote_snapshot(self, pixiv_id: int, work_type: WorkType) -> RemoteSnapshot:
-        if work_type == WorkType.NOVEL:
+        if normalize_work_kind(work_type) == "novel":
             return await self.client.get_novel_snapshot(pixiv_id)
         return await self.client.get_illust_snapshot(pixiv_id)
 
     async def _load(self, pixiv_id: int, work_type: WorkType) -> PixivWork | None:
-        kinds = ILLUSTRATION_TYPES if work_type == WorkType.ILLUST else (work_type,)
+        work_kind, work_id = work_identity(work_type, pixiv_id)
         stmt = (select(PixivWork)
-                .where(PixivWork.id == str(pixiv_id), PixivWork.work_type.in_(kinds))
+                .where(PixivWork.work_kind == work_kind, PixivWork.id == work_id)
                 .options(selectinload(PixivWork.versions).selectinload(PixivVersion.assets))
                 .execution_options(populate_existing=True))
         return (await self.session.execute(stmt)).scalar_one_or_none()

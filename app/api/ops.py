@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.session import get_session
+from app.services.remote_recheck import RemoteRecheckService
 
 from app.core.redis_client import get_redis
 from app.services.archive_jobs import ArchiveJobQueue
@@ -30,6 +33,11 @@ def archive_queue() -> ArchiveJobQueue:
 async def ops_status():
     """查询服务、worker、队列、schema 和磁盘的综合运行状态。"""
     return await OpsService().status()
+
+
+@router.get("/remote-rechecks")
+async def remote_rechecks(session: AsyncSession = Depends(get_session)):
+    return await RemoteRecheckService(session, get_redis()).status()
 
 
 @router.get("/jobs")

@@ -16,6 +16,12 @@ class PixivNotFoundError(PixivRemoteError):
     status_code = 404
 
 
+class AmbiguousWorkError(PixivRemoteError):
+    """A legacy numeric ID needs its novel/illustration namespace."""
+
+    status_code = 409
+
+
 class PixivRestrictedError(PixivRemoteError):
     """Pixiv 作品受限、私密或当前账号无权访问。"""
 

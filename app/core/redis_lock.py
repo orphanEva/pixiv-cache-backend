@@ -41,8 +41,9 @@ class RenewingRedisLock:
         self._lost = False
         self._stopping = False
 
-    async def acquire(self) -> bool:
-        acquired = await self.lock.acquire()
+    async def acquire(self, *, token: str | None = None) -> bool:
+        acquired = (await self.lock.acquire() if token is None
+                    else await self.lock.acquire(token=token))
         if acquired:
             self._renew_task = asyncio.create_task(self._renew_loop())
         return bool(acquired)

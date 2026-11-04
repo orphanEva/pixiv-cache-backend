@@ -123,7 +123,7 @@ async def test_explicit_series_archive_maps_remote_errors_to_http_status(
     from app.core import errors
     from app.services.series_archive import SeriesArchiveService
 
-    async def failed_discovery(self, kind, series_id, *, force_refresh=True):
+    async def failed_discovery(self, kind, series_id, *, force_refresh=True, bookmark_if_missing=False):
         raise getattr(errors, error_class)("Pixiv series request failed")
 
     monkeypatch.setattr(SeriesArchiveService, "enqueue", failed_discovery)
@@ -153,7 +153,7 @@ async def test_auto_expand_series_maps_not_found_to_http_404(monkeypatch):
             assert kind == WorkType.NOVEL
             return ("novel", 28356186)
 
-    async def failed_discovery(self, kind, series_id, *, force_refresh=True):
+    async def failed_discovery(self, kind, series_id, *, force_refresh=True, bookmark_if_missing=False):
         raise PixivNotFoundError("This series no longer exists")
 
     monkeypatch.setattr(SeriesArchiveService, "enqueue", failed_discovery)

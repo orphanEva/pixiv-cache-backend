@@ -1,0 +1,17 @@
+# Merge with docker-compose.yml so this service joins the backend project network.
+# Launch from an MCP client using `docker compose ... run --rm -T --no-deps mcp`.
+services:
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    image: pixiv-cache-mcp:local
+    profiles: ["mcp"]
+    stdin_open: true
+    tty: false
+    environment:
+      PIXIV_MCP_BACKEND_URL: "${PIXIV_MCP_BACKEND_URL:-http://api:8000}"
+      PIXIV_MCP_API_KEY: "${PIXIV_MCP_API_KEY:?Set PIXIV_MCP_API_KEY in the MCP client environment}"
+      PIXIV_MCP_TIMEOUT_SECONDS: "${PIXIV_MCP_TIMEOUT_SECONDS:-60}"
+      PIXIV_MCP_READ_ONLY: "${PIXIV_MCP_READ_ONLY:-false}"
+      PIXIV_MCP_MAX_RESPONSE_BYTES: "${PIXIV_MCP_MAX_RESPONSE_BYTES:-8388608}"

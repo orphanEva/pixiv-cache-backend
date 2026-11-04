@@ -7,7 +7,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.api.admin import router as admin_router
+from app.api.account_migrations import router as account_migrations_router
 from app.api.media import router as media_router
+from app.api.media_jobs import router as media_jobs_router
 from app.api.pixiv_auth import router as pixiv_auth_router
 from app.api.jobs import router as jobs_router
 from app.api.sync import router as sync_router
@@ -16,6 +18,7 @@ from app.api.ops import router as ops_router
 from app.api.routes import router
 from app.api.health import router as health_router
 from app.core.config import get_settings
+from app.core.errors import PixivRemoteError
 from app.core.logging import configure_logging, request_id_ctx
 from app.core.security import authorized
 from app.db.session import engine
@@ -40,7 +43,12 @@ async def lifespan(app: FastAPI):
     logger.info("application_stopped")
 
 
-app = FastAPI(title=settings.app_name, version="1.8.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.11.0", lifespan=lifespan)
+
+
+@app.exception_handler(PixivRemoteError)
+async def remote_error_handler(request: Request, exc: PixivRemoteError):
+    return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
 
 
 @app.middleware("http")
@@ -74,7 +82,9 @@ async def request_context(request: Request, call_next):
 app.include_router(router)
 app.include_router(health_router)
 app.include_router(admin_router)
+app.include_router(account_migrations_router)
 app.include_router(media_router)
+app.include_router(media_jobs_router)
 app.include_router(pixiv_auth_router)
 app.include_router(jobs_router)
 app.include_router(sync_router)

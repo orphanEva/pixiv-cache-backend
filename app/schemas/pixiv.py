@@ -1,5 +1,6 @@
 from __future__ import annotations
 from datetime import datetime
+from typing import Literal
 from pydantic import BaseModel, Field
 from app.models.work import WorkStatus, WorkType
 
@@ -83,6 +84,8 @@ class HistoryResponse(BaseModel):
 class DiscoveredWork(BaseModel):
     pixiv_id: int
     work_type: WorkType
+    series_id: str | None = None
+    series_type: Literal["novel", "manga"] | None = None
 
 
 class DiscoveryPage(BaseModel):

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 import time
@@ -174,6 +173,7 @@ return 0
         pixiv_id: int,
         *,
         force_refresh: bool = True,
+        bookmark_if_missing: bool = False,
         source_id: int | None = None,
         source_ids: Iterable[int] | None = None,
     ) -> dict[str, Any]:
@@ -182,49 +182,7 @@ return 0
         dedupe = self.dedupe_key(normalized, pixiv_id)
         sources = self._source_values(source_id, source_ids)
 
-        existing_id = await self.redis.get(dedupe)
-        if existing_id:
-            active = await self._attach_sources_if_active(existing_id, sources)
-            if active:
-                existing = await self.get(existing_id)
-                if existing:
-                    existing["deduplicated"] = True
-                    return existing
-            await self._delete_dedupe_if_owned(dedupe, existing_id)
-
         job_id = uuid.uuid4().hex
-        claimed = await self.redis.set(
-            dedupe,
-            job_id,
-            ex=self.settings.archive_job_dedupe_ttl_seconds,
-            nx=True,
-        )
-        if not claimed:
-            for _ in range(5):
-                existing_id = await self.redis.get(dedupe)
-                if existing_id:
-                    active = await self._attach_sources_if_active(
-                        existing_id,
-                        sources,
-                    )
-                    if active:
-                        existing = await self.get(existing_id)
-                        if existing:
-                            existing["deduplicated"] = True
-                            return existing
-                    await self._delete_dedupe_if_owned(dedupe, existing_id)
-                    claimed = await self.redis.set(
-                        dedupe,
-                        job_id,
-                        ex=self.settings.archive_job_dedupe_ttl_seconds,
-                        nx=True,
-                    )
-                    if claimed:
-                        break
-                await asyncio.sleep(0.01)
-            if not claimed:
-                raise RuntimeError("归档任务去重竞争无法在限定次数内解决")
-
         now = utc_iso()
         created_ts = time.time()
         mapping = {
@@ -233,6 +191,7 @@ return 0
             "kind": normalized.value,
             "pixiv_id": str(pixiv_id),
             "force_refresh": "1" if force_refresh else "0",
+            "bookmark_if_missing": "1" if bookmark_if_missing else "0",
             "attempts": "0",
             "created_at": now,
             "created_ts": repr(created_ts),
@@ -244,38 +203,52 @@ return 0
             "dead_reason": "",
             "result": "",
         }
-        try:
-            async with self.redis.pipeline(transaction=True) as pipe:
-                pipe.hset(self.status_key(job_id), mapping=mapping)
-                pipe.expire(
-                    self.status_key(job_id),
-                    self.settings.archive_job_status_ttl_seconds,
-                )
-                if sources:
-                    pipe.sadd(
-                        self.source_key(job_id),
-                        *[str(value) for value in sources],
-                    )
-                    pipe.expire(
-                        self.source_key(job_id),
-                        self.settings.archive_job_status_ttl_seconds,
-                    )
-                pipe.zadd(self.index_zset, {job_id: created_ts})
-                pipe.zadd(self.status_index_key("queued"), {job_id: created_ts})
-                pipe.xadd(self.stream, {"job_id": job_id})
-                await pipe.execute()
-        except Exception:
-            await self.redis.delete(
-                dedupe,
-                self.status_key(job_id),
-                self.source_key(job_id),
-            )
-            await self.redis.zrem(self.index_zset, job_id)
-            await self.redis.zrem(self.status_index_key("queued"), job_id)
-            raise
-
-        value = self._decode(mapping)
-        value["source_ids"] = sources
+        # Publish dedupe ownership, job fields and Stream entry atomically.
+        script = """
+local sources = cjson.decode(ARGV[6])
+local existing = redis.call('GET', KEYS[1])
+if existing then
+  local key = ARGV[3] .. existing
+  local status = redis.call('HGET', key, 'status')
+  local upgrading_bookmark = ARGV[8] == '1' and redis.call('HGET', key, 'bookmark_if_missing') ~= '1'
+  local upgrading_refresh = ARGV[7] == '1' and redis.call('HGET', key, 'force_refresh') ~= '1'
+  local can_merge = status == 'queued' or status == 'retry_wait' or
+    (status == 'running' and not upgrading_bookmark and not upgrading_refresh)
+  if can_merge then
+    for _, source in ipairs(sources) do redis.call('SADD', key .. ':sources', tostring(source)) end
+    if ARGV[7] == '1' then redis.call('HSET', key, 'force_refresh', '1') end
+    if ARGV[8] == '1' then redis.call('HSET', key, 'bookmark_if_missing', '1') end
+    redis.call('EXPIRE', key, ARGV[4])
+    redis.call('EXPIRE', key .. ':sources', ARGV[4])
+    redis.call('EXPIRE', KEYS[1], ARGV[5])
+    return {existing, 1}
+  end
+end
+local fields = cjson.decode(ARGV[2])
+for name, value in pairs(fields) do redis.call('HSET', KEYS[2], name, value) end
+redis.call('EXPIRE', KEYS[2], ARGV[4])
+for _, source in ipairs(sources) do redis.call('SADD', KEYS[3], tostring(source)) end
+redis.call('EXPIRE', KEYS[3], ARGV[4])
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[5])
+redis.call('ZADD', KEYS[4], ARGV[9], ARGV[1])
+redis.call('ZADD', KEYS[5], ARGV[9], ARGV[1])
+redis.call('XADD', KEYS[6], '*', 'job_id', ARGV[1])
+return {ARGV[1], 0}
+"""
+        accepted_id, deduplicated = await self.redis.eval(
+            script, 6, dedupe, self.status_key(job_id), self.source_key(job_id),
+            self.index_zset, self.status_index_key("queued"), self.stream,
+            job_id, json.dumps(mapping), self.status_prefix,
+            str(self.settings.archive_job_status_ttl_seconds),
+            str(self.settings.archive_job_dedupe_ttl_seconds), json.dumps(sources),
+            mapping["force_refresh"], mapping["bookmark_if_missing"], repr(created_ts),
+        )
+        # An uncertain response may follow a successful publication. Never
+        # delete its status/Stream entry or a newer submitter's dedupe key.
+        value = await self.get(accepted_id)
+        if value is None:
+            raise RuntimeError("Published archive job status is missing")
+        value["deduplicated"] = bool(deduplicated)
         return value
 
     async def get(self, job_id: str) -> dict[str, Any] | None:
@@ -339,6 +312,7 @@ return 0
             WorkType(previous["kind"]),
             int(previous["pixiv_id"]),
             force_refresh=bool(previous["force_refresh"]),
+            bookmark_if_missing=bool(previous.get("bookmark_if_missing")),
             source_ids=previous.get("source_ids") or [],
         )
 
@@ -351,45 +325,41 @@ return 0
         job_id: str,
         consumer: str,
     ) -> dict[str, Any] | None:
-        """把 queued/running 任务标记为执行中并增加尝试次数。
+        """认领 queued/running/finalizing 任务并增加尝试次数。
 
         对 retry_wait、dead、succeeded 等状态返回 None，worker 会清理对应的
         旧 Stream 消息而不会重复执行。
         """
         key = self.status_key(job_id)
-        current = await self.redis.hget(key, "status")
-        if current not in {"queued", "running"}:
+        script = """
+local status = redis.call('HGET', KEYS[1], 'status')
+if status ~= 'queued' and status ~= 'running' and status ~= 'finalizing' then return 0 end
+redis.call('HINCRBY', KEYS[1], 'attempts', 1)
+redis.call('HSET', KEYS[1], 'status', 'running', 'started_at', ARGV[1],
+  'finished_at', '', 'retry_at', '', 'consumer', ARGV[2], 'error_type', '', 'error', '', 'dead_reason', '')
+redis.call('EXPIRE', KEYS[1], ARGV[3])
+redis.call('EXPIRE', KEYS[2], ARGV[3])
+return 1
+"""
+        claimed = await self.redis.eval(
+            script, 2, key, self.source_key(job_id), utc_iso(), consumer,
+            str(self.settings.archive_job_status_ttl_seconds),
+        )
+        if not claimed:
             return None
-        async with self.redis.pipeline(transaction=True) as pipe:
-            pipe.hincrby(key, "attempts", 1)
-            pipe.hset(
-                key,
-                mapping={
-                    "status": "running",
-                    "started_at": utc_iso(),
-                    "finished_at": "",
-                    "retry_at": "",
-                    "consumer": consumer,
-                    "error_type": "",
-                    "error": "",
-                    "dead_reason": "",
-                },
-            )
-            pipe.expire(key, self.settings.archive_job_status_ttl_seconds)
-            pipe.expire(
-                self.source_key(job_id),
-                self.settings.archive_job_status_ttl_seconds,
-            )
-            await pipe.execute()
         await self._move_status(job_id, "running")
         return await self.get(job_id)
 
     async def mark_finalizing(self, job_id: str) -> dict[str, Any] | None:
         """进入来源关系最终落库阶段，禁止新来源继续并入当前任务。"""
         key = self.status_key(job_id)
-        if await self.redis.hget(key, "status") != "running":
+        script = """
+if redis.call('HGET', KEYS[1], 'status') ~= 'running' then return 0 end
+redis.call('HSET', KEYS[1], 'status', 'finalizing')
+return 1
+"""
+        if not await self.redis.eval(script, 1, key):
             return None
-        await self.redis.hset(key, "status", "finalizing")
         await self._move_status(job_id, "finalizing")
         return await self.get(job_id)
 
@@ -689,8 +659,8 @@ return 1
                 value[key] = int(value[key])
         if value.get("created_ts"):
             value["created_ts"] = float(value["created_ts"])
-        if "force_refresh" in value:
-            value["force_refresh"] = value["force_refresh"] in (
+        for flag in ("force_refresh", "bookmark_if_missing"):
+            value[flag] = value.get(flag, False) in (
                 True,
                 1,
                 "1",

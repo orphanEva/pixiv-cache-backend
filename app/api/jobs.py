@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.core.redis_client import get_redis
+from app.core.config import get_settings
 from app.core.errors import PixivRemoteError
 from app.db.session import get_session
 from app.api.routes import get_client
@@ -42,13 +43,15 @@ async def enqueue_series_archive(
     series_type: Literal["novel", "manga"],
     series_id: int,
     force_refresh: bool = Query(True),
+    bookmark_if_missing: bool = Query(True),
     session: AsyncSession = Depends(get_session),
     client: PixivPyClient = Depends(get_client),
 ):
     """手工下载整套小说或漫画系列，且将系列与成员写入 MySQL。"""
     try:
         return await SeriesArchiveService(session, client, queue()).enqueue(
-            series_type, series_id, force_refresh=force_refresh
+            series_type, series_id, force_refresh=force_refresh,
+            bookmark_if_missing=bookmark_if_missing and get_settings().pixiv_auto_bookmark_on_api_download,
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -63,6 +66,7 @@ async def enqueue_archive_job(
     pixiv_id: int,
     force_refresh: bool = Query(True),
     expand_series: bool = Query(True, description="Auto-discover and archive the full novel/manga series."),
+    bookmark_if_missing: bool = Query(True),
     session: AsyncSession = Depends(get_session),
     client: PixivPyClient = Depends(get_client),
 ):
@@ -82,14 +86,16 @@ async def enqueue_archive_job(
             series_type, series_id = detected
             try:
                 return await SeriesArchiveService(session, client, queue()).enqueue(
-                    series_type, series_id, force_refresh=force_refresh
+                    series_type, series_id, force_refresh=force_refresh,
+                    bookmark_if_missing=bookmark_if_missing and get_settings().pixiv_auto_bookmark_on_api_download,
                 )
             except ValueError as exc:
                 # 明确的结构/完整性错误不允许误报为“全集已下载”。
                 raise HTTPException(422, str(exc)) from exc
             except PixivRemoteError as exc:
                 raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    return await queue().enqueue(kind, pixiv_id, force_refresh=force_refresh)
+    return await queue().enqueue(kind, pixiv_id, force_refresh=force_refresh,
+        bookmark_if_missing=bookmark_if_missing and get_settings().pixiv_auto_bookmark_on_api_download)
 
 
 @router.get("/series/{series_type}/{series_id}")

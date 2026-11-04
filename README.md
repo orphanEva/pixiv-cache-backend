@@ -1,12 +1,23 @@
 # Pixiv Cache Backend
 
+当前版本 **v1.11.0 / schema v9**：新增 MCP stdio 服务，可让 MCP 客户端查询资料库、读取小说、下载归档、同步收藏、迁移账号收藏及补生成动图 MP4。
+使用 `python -m pip install -e ".[mcp]"` 安装后，以 `pixiv-cache-mcp` 或 `python -m app.mcp` 启动；需配置 `PIXIV_MCP_BACKEND_URL` 和 `PIXIV_MCP_API_KEY`，连接已运行的 HTTP 后端。
+完整客户端配置、轻量容器启动及只读模式见 [MCP 接入说明](docs/MCP.md)。MCP 本身无需新增表。
+本次合并同时保留旧小说追更来源；已用旧脚本升级至 schema v9 的库须手工执行
+`sql/upgrades/v7_v9_sync_sources_compat.sql` 补齐兼容枚举，版本号仍为 9。
+v1.10 已修复同号小说与插画冲突、完善备份恢复，支持旧作品定期复查和本地动图 MP4 补生成。
+仍保留私密收藏、换号迁移、合集订阅、断点续跑和全局限速。
+已有 v8 库执行 `sql/upgrades/v8_to_v9.sql`；更早的 v6–v7 库先按对应脚本逐步升级。
+详见 [v1.10 升级与使用说明](docs/V1_10_RELIABILITY.md)及[收藏与换号说明](docs/BOOKMARKS_SERIES_AND_LIMITS.md)。
+下文旧版本章节保留历史功能说明。
+
 FastAPI + externally managed **MySQL 8** + Redis. Versioned, local Pixiv
 illustration and novel cache built around the manually versioned `pixiv_archive` schema.
 
 ## Manual SQL initialization — no automatic DDL
 
 The API container does **not** create a database or run migrations. Docker
-Compose starts the API and Redis only. MySQL must already exist.
+Compose starts the API, workers and Redis. MySQL must already exist.
 
 **For a brand-new empty database:** manually run
 [sql/pixiv_archive.sql](sql/pixiv_archive.sql) as a MySQL administrator, then
@@ -84,6 +95,8 @@ All non-health routes require an `X-API-Key` header.
 - `POST /api/ops/jobs/{job_id}/replay`
 - `POST /api/sync/sources/author/{user_id}`
 - `POST /api/sync/sources/bookmarks/{user_id}`
+- `POST /api/sync/sources/watchlist/novel` (legacy novel-only watchlist)
+- `POST /api/sync/sources/followed-series` (novel/manga watched series)
 - `GET /api/sync/sources`
 - `POST /api/sync/sources/{id}/run`
 - `GET /api/sync/jobs/{job_id}`
@@ -176,8 +189,8 @@ Example shape:
 ```
 
 The response never contains the refresh token, raw cookie, PHPSESSID or access
-token. Keep `.env` private. If future Pixiv Web POST operations are added,
-they must also implement Pixiv's CSRF-token flow; current Web usage is GET-only.
+token. Keep `.env` private. Account migration's Web follow operations validate
+the App/Web account identity and use Pixiv's CSRF-token flow before writing.
 
 
 ## Pixiv token-only authentication
@@ -242,10 +255,10 @@ Use `verify_hash=true` for a full SHA-256 audit. The endpoint reports missing
 registered files, hash mismatches, orphan version directories, stale `.part`
 files, and paths outside the configured storage root. It never deletes files.
 
-### 数据库版本：v7 全新初始化
+### 数据库版本：v9 初始化与兼容升级
 
-因为项目还没有投入使用，这次直接重构了系列表的主键和外键。
-**全新空库执行 `sql/pixiv_archive.sql` (v7)；已运行 v6 数据库请备份后执行 `sql/upgrades/v6_to_v7.sql`，不要重新建库。**
+**全新空库执行当前 `sql/pixiv_archive.sql`（v9）；已有 v6/v7/v8 数据库须备份后按当前手工脚本逐级升级，不要重新建库。**
+已使用旧脚本升级的 v9 库需执行同步源兼容补丁，保留旧 `watchlist` 与新 `followed_series` 两种类型。
 运行时程序从不自动建表或迁移。详见
 [全新建库指南](docs/MANUAL_DATABASE_SETUP.md)。
 
@@ -425,7 +438,7 @@ existing archive Redis Stream.
 
 ### 历史版本结构说明
 
-本节介绍旧版的同步源功能；当前运行版本使用 v7 新建表，运行中的 v6 数据库可手动升级，不应套用历史迁移脚本。
+本节介绍旧版的同步源功能；当前运行版本要求 schema v9，运行中的 v6/v7/v8 数据库可按当前指南手动升级，不应套用 v1–v5 历史迁移脚本。
 
 ## v1.5 API-first library
 
@@ -575,10 +588,9 @@ POST /api/ops/jobs/{job_id}/replay
 
 最新 `sql/pixiv_archive.sql` 已为每张表、每个字段提供中文 COMMENT，
 适合直接在 DataGrip、Navicat 或 IDEA Database 查看。
-当前程序要求 `schema_version=7`；新装使用最新 DDL，已有 v6 库通过 `sql/upgrades/v6_to_v7.sql` 升级。
+当前程序要求 `schema_version=9`；支持新库初始化或现有 v6/v7/v8 库手工升级。
 
-
-## 自动备份小说追更列表（v1.8，Schema v7）
+## 自动备份小说追更列表（保留 v1.8 接口）
 
 这是 Pixiv 小说合集页面的 **「加入追更列表」**，不是普通小说收藏夹。
 依赖有效的 `PIXIV_COOKIE`（通常包含 PHPSESSID）和已启动的 `sync`、`worker` 服务。
@@ -593,8 +605,10 @@ curl -X POST -H "X-API-Key: $API_KEY" \
 可从 `GET /api/sync/sources` 取得同步源 ID，使用 `GET /api/sync/jobs/{job_id}` 查看扫描状态，或用 `POST /api/sync/sources/{id}/run?full=true` 手动触发。
 
 - 首次从 Pixiv Web `/ajax/watch_list/novel` 读取追更列表；以后每次都重新扫描旧合集，不能用普通收藏的增量边界跳过旧合集。
-- 通过现有合集发现服务遍历章节；已成功归档的章节不重复投递，新增或之前失败的章节进入 Redis 队列。
-- 取消追更后，该合集不再被后续扫描；本地已经归档的文件不会删除。
-- **这项功能需要现有数据库从 v6 升级至 v7。** 不要对有数据的库执行全量初始化 SQL。
+- 普通续扫通过现有合集发现服务补齐缺失章节；首次扫描或手动 `full=true` 会验证已有作品，旧作定期复查由独立复查流程处理。
+- 此旧接口不创建独立合集订阅；取消远端追更后，下一次完整清单扫描不再处理该合集，本地归档文件不会删除。
+- **当前版本要求 schema v9，并保留 `type='watchlist'` 的旧记录。** v6/v7/v8 按当前脚本升级，旧 v9 执行兼容补丁；不要在有数据的库执行全量初始化 SQL。
 - 接口为未公开的 Pixiv Web AJAX，真实账号的结构仍需现场验证；如 Cookie 失效或响应结构变化，任务明确失败，不会假称全集完成。
-- 目前自动追更仅支持 **小说**；漫画追更列表和自动扫描所有关注作者尚未接入。
+- 此兼容接口只支持 **小说**。新的 `POST /api/sync/sources/followed-series` 同时支持小说和漫画追更；自动扫描所有关注作者未接入。
+
+新 `followed-series` 来源会建立持久化的本地合集子订阅。取消远端追更后，如需停止这些独立子订阅，须通过同步源接口显式停用；这与旧小说追更接口的行为不同。

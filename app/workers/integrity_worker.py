@@ -6,6 +6,7 @@ import signal
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.core.maintenance import MaintenanceWriter
 from app.core.redis_client import close_redis, get_redis
 from app.core.redis_lock import RenewingRedisLock
 from app.core.schema_version import ensure_schema_version
@@ -66,7 +67,7 @@ class IntegrityWorker:
             logger.info("integrity_audit_skipped_lock_busy")
             return
         try:
-            async with SessionLocal() as session:
+            async with MaintenanceWriter(self.redis), SessionLocal() as session:
                 result = await StorageIntegrityService(session).audit(
                     verify_hash=self.settings.integrity_audit_verify_hash,
                     repair_safe=self.settings.integrity_audit_repair_safe,

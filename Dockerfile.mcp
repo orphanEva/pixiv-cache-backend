@@ -1,0 +1,12 @@
+FROM python:3.12-slim
+WORKDIR /opt/pixiv-mcp
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+
+# This image is only the HTTP-to-MCP adapter. Database drivers, PixivPy and
+# FFmpeg remain in the separately deployed backend/worker containers.
+COPY requirements-mcp.txt ./requirements-mcp.txt
+RUN pip install --no-cache-dir -r requirements-mcp.txt
+
+COPY app/__init__.py ./app/__init__.py
+COPY app/mcp ./app/mcp
+CMD ["python", "-m", "app.mcp"]

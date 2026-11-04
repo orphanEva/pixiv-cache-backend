@@ -2,12 +2,12 @@
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.security import cache_read_allowed
 from app.db.session import get_session
-from app.models.work import PixivAsset, PixivVersion, PixivWork, WorkType
+from app.models.work import PixivAsset, PixivVersion, PixivWork, WorkType, normalize_work_kind
 
 router = APIRouter(tags=["media"])
 
@@ -18,8 +18,8 @@ async def get_media(kind: WorkType, pixiv_id: int, version_no: int, filename: st
     result = await session.execute(
         select(PixivAsset.local_path, PixivWork.status)
         .join(PixivVersion, PixivAsset.version_id == PixivVersion.id)
-        .join(PixivWork, PixivVersion.work_id == PixivWork.id)
-        .where(PixivWork.work_type == kind, PixivWork.id == str(pixiv_id),
+        .join(PixivWork, and_(PixivVersion.work_id == PixivWork.id, PixivVersion.work_kind == PixivWork.work_kind))
+        .where(PixivWork.work_kind == normalize_work_kind(kind), PixivWork.id == str(pixiv_id),
                PixivVersion.version_no == version_no))
     root = get_settings().storage_root.resolve()
     for local_path, status in result.all():

@@ -1,0 +1,8 @@
+# Only the adapter sources and dependency list enter this build context.
+# Backend credentials, archived media and virtual environments stay on the host.
+**
+!requirements-mcp.txt
+!app/
+!app/__init__.py
+!app/mcp/
+!app/mcp/*.py

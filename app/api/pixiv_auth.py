@@ -3,10 +3,11 @@
 Global API-key middleware protects this router. No credential material is
 returned or logged.
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.routes import get_client
 from app.clients.pixivpy_client import PixivPyClient
+from app.core.errors import PixivRemoteError
 
 router = APIRouter(prefix="/api/admin/pixiv", tags=["pixiv-auth"])
 
@@ -19,4 +20,7 @@ async def pixiv_auth_status(client: PixivPyClient = Depends(get_client)):
 @router.post("/auth/refresh")
 async def pixiv_auth_refresh(client: PixivPyClient = Depends(get_client)):
     """Revalidate configured App token and Web Cookie without account login."""
-    return await client.recover_auth()
+    try:
+        return await client.recover_auth()
+    except PixivRemoteError as exc:
+        raise HTTPException(exc.status_code, type(exc).__name__) from exc

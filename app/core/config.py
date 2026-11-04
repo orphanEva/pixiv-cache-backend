@@ -1,5 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +15,11 @@ class Settings(BaseSettings):
     # Pixiv App/Web authentication is token/cookie-only (no password login).
     pixiv_refresh_token: str = ""
     pixiv_cookie: str = ""
+    pixiv_request_interval_seconds: float = Field(default=2.0, ge=0)
+    pixiv_rate_limit_cooldown_seconds: float = Field(default=300, ge=1)
+    pixiv_rate_limit_prefix: str = "pixiv:rate"
+    pixiv_auto_bookmark_on_api_download: bool = True
+    pixiv_auto_bookmark_restrict: Literal["private", "public"] = "private"
     log_level: str = "INFO"
     log_file: str = ""
     log_max_bytes: int = 10 * 1024 * 1024
@@ -24,7 +31,7 @@ class Settings(BaseSettings):
     pixiv_web_locale: str = "zh-CN"
 
     api_key: str = ""
-    remote_check_ttl_seconds: int = 0
+    remote_check_ttl_seconds: int = 21600
     pixiv_deep_image_check: bool = False
     cache_lock_prefix: str = "pixiv-cache:"
     lock_ttl_seconds: int = 180
@@ -42,6 +49,16 @@ class Settings(BaseSettings):
     ugoira_max_frames: int = 10000
     ugoira_max_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024
     ffmpeg_binary: str = "ffmpeg"
+    ugoira_conversion_timeout_seconds: int = Field(default=600, ge=1)
+
+    media_job_prefix: str = "pixiv:media"
+    media_job_status_ttl_seconds: int = Field(default=604800, ge=60)
+    media_job_claim_idle_ms: int = Field(default=900000, ge=3000)
+    media_job_max_attempts: int = Field(default=3, ge=1)
+    media_job_retry_base_seconds: int = Field(default=30, ge=1)
+    media_job_retry_max_seconds: int = Field(default=1800, ge=1)
+    media_worker_block_ms: int = Field(default=5000, ge=1)
+    media_worker_heartbeat_ttl_seconds: int = Field(default=30, ge=3)
 
     archive_job_stream: str = "pixiv:archive:jobs"
     archive_job_group: str = "pixiv-archive-workers"
@@ -76,14 +93,31 @@ class Settings(BaseSettings):
     sync_due_batch_size: int = 20
     sync_schedule_reservation_seconds: int = 15 * 60
     sync_failure_retry_seconds: int = 15 * 60
-    sync_max_pages_per_run: int = 1000
+    sync_max_pages_per_run: int = Field(default=20, ge=1)
     sync_frontier_size: int = 50
-    sync_page_delay_seconds: float = 0.2
+    sync_page_delay_seconds: float = Field(default=2.0, ge=0)
+    sync_work_recheck_ttl_seconds: int = Field(default=86400, ge=0)
+    remote_recheck_enabled: bool = True
+    remote_recheck_interval_seconds: int = Field(default=604800, ge=3600)
+    remote_recheck_poll_seconds: int = Field(default=60, ge=1)
+    remote_recheck_batch_size: int = Field(default=10, ge=1, le=100)
+    remote_recheck_reservation_seconds: int = Field(default=3600, ge=60)
+    sync_resume_delay_seconds: int = Field(default=30, ge=1)
+
+    account_migration_enabled: bool = True
+    account_migration_batch_size: int = Field(default=10, ge=1, le=100)
+    account_migration_scan_page_size: int = Field(default=200, ge=1, le=1000)
+    account_migration_retry_base_seconds: int = Field(default=60, ge=1)
+    account_migration_retry_max_seconds: int = Field(default=3600, ge=1)
+    account_migration_max_attempts: int = Field(default=5, ge=1)
+    account_migration_lock_ttl_seconds: int = Field(default=180, ge=3)
+    account_migration_tick_seconds: int = Field(default=30, ge=1)
 
     maintenance_freeze_key: str = "pixiv:maintenance:freeze"
     maintenance_freeze_ttl_seconds: int = 2 * 3600
     maintenance_freeze_wait_seconds: int = 5
     maintenance_wait_for_writers_seconds: int = 30 * 60
+    maintenance_writer_ttl_seconds: int = Field(default=180, ge=3)
     maintenance_database_url: str = ""
     backup_root: Path = Path("/data/pixiv/.backups")
 

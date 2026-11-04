@@ -11,15 +11,18 @@ from sqlalchemy import or_, select
 
 from app.clients.pixivpy_client import PixivPyClient
 from app.core.config import get_settings
+from app.core.errors import ArchiveMaintenanceError
 from app.core.logging import configure_logging
-from app.core.maintenance import maintenance_active
+from app.core.maintenance import maintenance_active, MaintenanceWriter
 from app.core.redis_client import close_redis, get_redis
 from app.core.schema_version import ensure_schema_version
 from app.db.session import SessionLocal, engine
 from app.models.work import SyncSource
 from app.services.cache_service import now_utc
+from app.services.account_migration import AccountMigrationService
 from app.services.source_sync import SourceSyncService
 from app.services.sync_jobs import SyncJobQueue
+from app.services.remote_recheck import RemoteRecheckService
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,11 @@ class SyncWorker:
         self.consumer = f"{socket.gethostname()}-{os.getpid()}"
         self._heartbeat_task: asyncio.Task | None = None
         self._last_schedule = 0.0
+        self._last_account_migration = 0.0
+        self._account_activation_done = False
+        self._activated_account_id: str | None = None
+        self._account_superseded = False
+        self._last_recheck_schedule = 0.0
 
     async def run(self) -> None:
         if self.settings.schema_check_on_startup:
@@ -46,7 +54,16 @@ class SyncWorker:
                 if await maintenance_active(self.redis):
                     await asyncio.sleep(2)
                     continue
-                await self._schedule_due_if_needed()
+                await self._migrate_account_if_needed()
+                if self._account_superseded:
+                    await asyncio.sleep(2)
+                    continue
+                try:
+                    await self._schedule_due_if_needed()
+                except ArchiveMaintenanceError:
+                    await asyncio.sleep(2)
+                    continue
+                await self._schedule_remote_rechecks()
                 item = await self.queue.read_one(
                     self.consumer,
                     block_ms=self.settings.sync_worker_block_ms,
@@ -65,6 +82,57 @@ class SyncWorker:
                 self._heartbeat_task = None
             logger.info("sync_worker_stopped", extra={"consumer": self.consumer})
 
+    async def _migrate_account_if_needed(self) -> None:
+        if not self.settings.account_migration_enabled or self._account_superseded:
+            return
+        now_mono = asyncio.get_running_loop().time()
+        if now_mono - self._last_account_migration < self.settings.account_migration_tick_seconds:
+            return
+        self._last_account_migration = now_mono
+        try:
+            async with MaintenanceWriter(self.redis), SessionLocal() as session:
+                service = AccountMigrationService(
+                    session, self.client, self.redis,
+                )
+                try:
+                    result = await service.tick(allow_account_switch=not self._account_activation_done)
+                finally:
+                    # Consume startup authorization even if a later item or an
+                    # uncertain activation COMMIT fails. An older worker must
+                    # never regain permission to replace a newer account.
+                    if getattr(service, "activation_attempted", False):
+                        self._account_activation_done = True
+                        self._activated_account_id = service.activation_target
+                target_id = result.get("target_user_id")
+                if result.get("status") == "account_changed" or (
+                    self._activated_account_id is not None and target_id is not None
+                    and str(target_id) != self._activated_account_id
+                ):
+                    self._account_superseded = True
+                    logger.warning("sync_worker_account_superseded_restart_required")
+                elif result.get("activation_succeeded"):
+                    self._account_activation_done = True
+                    self._activated_account_id = str(target_id) if target_id else None
+        except Exception as exc:
+            # A failing export must not stop discovery. Persisted items resume
+            # on the next tick; do not include upstream credential-bearing text.
+            logger.warning("account_migration_tick_failed", extra={
+                "error_type": exc.__class__.__name__,
+            })
+
+    async def _schedule_remote_rechecks(self) -> None:
+        if not self.settings.remote_recheck_enabled:
+            return
+        now = asyncio.get_running_loop().time()
+        if now - self._last_recheck_schedule < self.settings.remote_recheck_poll_seconds:
+            return
+        self._last_recheck_schedule = now
+        try:
+            async with SessionLocal() as session:
+                await RemoteRecheckService(session, self.redis).schedule()
+        except Exception as exc:
+            logger.warning("remote_recheck_schedule_failed", extra={"error_type": type(exc).__name__})
+
     async def _schedule_due_if_needed(self) -> None:
         if self.settings.sync_scheduler_poll_seconds <= 0:
             return
@@ -74,7 +142,7 @@ class SyncWorker:
             return
         self._last_schedule = now_mono
         now = now_utc()
-        async with SessionLocal() as session:
+        async with MaintenanceWriter(self.redis), SessionLocal() as session:
             sources = (
                 await session.execute(
                     select(SyncSource)
@@ -107,30 +175,39 @@ class SyncWorker:
             return
 
         lease_task = asyncio.create_task(self._touch_job_lease(stream_id))
+        disposition_saved = False
         try:
-            async with SessionLocal() as session:
+            async with MaintenanceWriter(self.redis), SessionLocal() as session:
                 source = await session.get(SyncSource, job["source_id"])
                 if source is None:
                     raise RuntimeError(f"Sync source {job['source_id']} no longer exists")
-                if not source.enabled and not job.get("full"):
+                if not source.enabled:
                     result = {
                         "source_id": source.id,
                         "skipped": True,
                         "reason": "source_disabled",
                     }
                 else:
+                    if job.get("restart_scan"):
+                        source.scan_state_json = None
+                        await session.commit()
+                        # Clear only after the DB reset is durable, before scanning
+                        # new pages, so reclaiming a later crash resumes progress.
+                        await self.queue.clear_restart_scan(job_id)
                     result = await SourceSyncService(
                         session,
                         self.client,
                         self.redis,
                     ).run_source(source, full=bool(job.get("full")))
-            await self.queue.mark_succeeded(job_id, result)
+            followup = await self.queue.mark_succeeded(job_id, result)
+            disposition_saved = True
             logger.info(
-                "sync_job_succeeded",
+                "sync_job_full_rescan_queued" if followup else "sync_job_succeeded",
                 extra={"job_id": job_id, "source_id": job["source_id"]},
             )
         except Exception as exc:
             await self.queue.mark_failed(job_id, exc)
+            disposition_saved = True
             logger.error(
                 "sync_job_failed",
                 extra={
@@ -146,7 +223,11 @@ class SyncWorker:
                 await lease_task
             except asyncio.CancelledError:
                 pass
-            await self.queue.ack(stream_id)
+            except Exception:
+                logger.exception("sync_job_lease_refresh_failed", extra={"job_id": job_id})
+            # A failed status write must leave the pending entry recoverable.
+            if disposition_saved:
+                await self.queue.ack(stream_id)
 
     async def _touch_job_lease(self, stream_id: str) -> None:
         interval = max(5, self.settings.sync_job_claim_idle_ms // 3000)

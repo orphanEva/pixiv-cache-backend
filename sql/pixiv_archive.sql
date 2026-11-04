@@ -13,7 +13,7 @@ CREATE TABLE schema_version (
   CONSTRAINT chk_schema_version_singleton CHECK (id = 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='数据库结构版本元数据';
 
-INSERT INTO schema_version (id, version) VALUES (1, 7);
+INSERT INTO schema_version (id, version) VALUES (1, 9);
 
 CREATE TABLE series (
   id VARCHAR(32) NOT NULL COMMENT 'Pixiv 系列 ID',
@@ -40,6 +40,7 @@ CREATE TABLE tags (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作品标签字典';
 
 CREATE TABLE works (
+  work_kind ENUM('illust','novel') NOT NULL COMMENT '作品身份命名空间，漫画和动图属于插画',
   id VARCHAR(32) NOT NULL COMMENT 'Pixiv 作品 ID',
   type ENUM('illust','manga','ugoira','novel') NOT NULL COMMENT '作品类型：插画、漫画、动图或小说',
   status ENUM('active','deleted','private','unavailable','auth_required','error') NOT NULL DEFAULT 'active' COMMENT '当前远端可访问状态',
@@ -60,10 +61,13 @@ CREATE TABLE works (
   raw_meta JSON COMMENT 'Pixiv 当前原始元数据 JSON',
   version_token CHAR(64) NOT NULL COMMENT '当前版本内容指纹 SHA-256',
   current_version_no INT UNSIGNED NOT NULL DEFAULT 1 COMMENT '当前生效的本地归档版本号',
+  next_recheck_at DATETIME COMMENT '旧作品远端复查任务的下次允许投递时间',
   last_checked_at DATETIME COMMENT '最后一次成功检查 Pixiv 远端状态时间',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '作品首次归档时间',
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '当前作品记录最后更新时间',
-  PRIMARY KEY (id),
+  PRIMARY KEY (work_kind,id),
+  KEY idx_work_recheck (status,next_recheck_at,last_checked_at),
+  CONSTRAINT chk_work_namespace CHECK ((work_kind='novel' AND type='novel') OR (work_kind='illust' AND type IN ('illust','manga','ugoira'))),
   KEY idx_type_status (type,status),
   KEY idx_author_id (author_id),
   KEY idx_remote_update_at (remote_update_at),
@@ -74,6 +78,7 @@ CREATE TABLE works (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作品当前状态与当前版本元数据';
 
 CREATE TABLE work_history (
+  work_kind ENUM('illust','novel') NOT NULL COMMENT '作品身份命名空间，漫画和动图属于插画',
   history_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '历史版本本地主键',
   work_id VARCHAR(32) NOT NULL COMMENT '关联的 Pixiv 作品 ID',
   version_num INT UNSIGNED NOT NULL COMMENT '作品本地不可变版本号',
@@ -87,11 +92,12 @@ CREATE TABLE work_history (
   storage_path VARCHAR(1000) NOT NULL COMMENT '该版本归档目录路径',
   archived_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '该版本完成归档时间',
   PRIMARY KEY (history_id),
-  UNIQUE KEY uk_work_version (work_id, version_num),
-  CONSTRAINT fk_wh_work_id FOREIGN KEY (work_id) REFERENCES works(id) ON DELETE CASCADE
+  UNIQUE KEY uk_work_version (work_kind,work_id, version_num),
+  CONSTRAINT fk_wh_work_id FOREIGN KEY (work_kind,work_id) REFERENCES works(work_kind,id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作品不可变历史版本';
 
 CREATE TABLE work_files (
+  work_kind ENUM('illust','novel') NOT NULL COMMENT '作品身份命名空间，漫画和动图属于插画',
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '当前文件记录本地主键',
   work_id VARCHAR(32) NOT NULL COMMENT '关联的 Pixiv 作品 ID',
   page_index INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '作品页序号或文件逻辑序号',
@@ -102,8 +108,8 @@ CREATE TABLE work_files (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '当前文件记录创建时间',
   PRIMARY KEY (id),
   KEY idx_work_id (work_id),
-  UNIQUE KEY uk_work_file_identity (work_id, page_index, file_type),
-  CONSTRAINT fk_wf_work_id FOREIGN KEY (work_id) REFERENCES works(id) ON DELETE CASCADE
+  UNIQUE KEY uk_work_file_identity (work_kind,work_id, page_index, file_type),
+  CONSTRAINT fk_wf_work_id FOREIGN KEY (work_kind,work_id) REFERENCES works(work_kind,id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作品当前版本文件索引';
 
 CREATE TABLE work_history_files (
@@ -123,25 +129,29 @@ CREATE TABLE work_history_files (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作品历史版本文件索引';
 
 CREATE TABLE work_tag_relation (
+  work_kind ENUM('illust','novel') NOT NULL COMMENT '作品身份命名空间，漫画和动图属于插画',
   work_id VARCHAR(32) NOT NULL COMMENT 'Pixiv 作品 ID',
   tag_id INT UNSIGNED NOT NULL COMMENT '标签本地主键',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '作品与标签关系创建时间',
-  PRIMARY KEY (work_id,tag_id),
+  PRIMARY KEY (work_kind,work_id,tag_id),
   KEY idx_tag_id (tag_id),
   CONSTRAINT fk_wtr_tag_id FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE,
-  CONSTRAINT fk_wtr_work_id FOREIGN KEY (work_id) REFERENCES works(id) ON DELETE CASCADE
+  CONSTRAINT fk_wtr_work_id FOREIGN KEY (work_kind,work_id) REFERENCES works(work_kind,id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作品与标签多对多关系';
 
 CREATE TABLE sync_sources (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '同步源本地主键',
-  type ENUM('author','bookmarks','watchlist') NOT NULL COMMENT '同步源类型：作者、收藏或追更列表',
-  remote_user_id VARCHAR(32) NOT NULL COMMENT 'Pixiv 用户 ID；self 表示当前认证账号',
+  type ENUM('author','bookmarks','novel_series','manga_series','followed_series','watchlist') NOT NULL COMMENT '同步源类型：作者、收藏、小说合集、漫画合集、追更清单或兼容旧小说追更',
+  remote_user_id VARCHAR(32) NOT NULL COMMENT '远端用户或合集 ID；self 表示相应凭据的当前账号',
   restrict_mode ENUM('public','private') NOT NULL DEFAULT 'public' COMMENT '收藏可见范围：公开或私密',
   include_illust TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否同步插画/漫画/Ugoira',
   include_novel TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否同步小说',
+  expand_series TINYINT(1) NOT NULL DEFAULT 0 COMMENT '收藏扫描是否展开并持续订阅所属合集，默认关闭',
   enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '同步源是否启用',
   interval_seconds INT UNSIGNED NOT NULL DEFAULT 21600 COMMENT '自动同步周期，单位秒',
   frontier_json JSON COMMENT '上次成功同步保存的增量边界 JSON',
+  account_id VARCHAR(32) COMMENT 'self 来源分页进度所属的已验证账号 ID',
+  scan_state_json JSON COMMENT '未完成扫描的分页游标、候选边界和全量模式；完成后清空',
   next_run_at DATETIME COMMENT '下一次计划执行时间',
   last_run_at DATETIME COMMENT '最近一次开始执行时间',
   last_success_at DATETIME COMMENT '最近一次成功执行时间',
@@ -151,16 +161,17 @@ CREATE TABLE sync_sources (
   PRIMARY KEY (id),
   UNIQUE KEY uk_sync_source_identity (type, remote_user_id, restrict_mode),
   KEY idx_sync_due (enabled, next_run_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作者、收藏或追更列表的持久化自动同步配置';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='作者、收藏、合集及兼容旧小说追更的持久化自动同步配置';
 
 CREATE TABLE work_sources (
+  work_kind ENUM('illust','novel') NOT NULL COMMENT '作品身份命名空间，漫画和动图属于插画',
   work_id VARCHAR(32) NOT NULL COMMENT 'Pixiv 作品 ID',
   source_id BIGINT UNSIGNED NOT NULL COMMENT '发现该作品的同步源 ID',
   first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '该同步源首次发现作品时间',
   last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '该同步源最近一次发现作品时间',
-  PRIMARY KEY (work_id, source_id),
+  PRIMARY KEY (work_kind,work_id, source_id),
   KEY idx_work_sources_source (source_id, last_seen_at),
-  CONSTRAINT fk_ws_work_id FOREIGN KEY (work_id) REFERENCES works(id) ON DELETE CASCADE,
+  CONSTRAINT fk_ws_work_id FOREIGN KEY (work_kind,work_id) REFERENCES works(work_kind,id) ON DELETE CASCADE,
   CONSTRAINT fk_ws_source_id FOREIGN KEY (source_id) REFERENCES sync_sources(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='归档作品与同步来源的多对多追踪关系';
 
@@ -179,3 +190,47 @@ CREATE TABLE series_members (
   KEY idx_series_members_work (work_id),
   CONSTRAINT fk_series_member_parent FOREIGN KEY (series_type,series_id) REFERENCES series(type,id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='系列作品发现、排队和归档进度';
+
+CREATE TABLE account_migration_state (
+  id INT NOT NULL COMMENT '固定主键，应用使用 1',
+  active_user_id VARCHAR(32) NOT NULL COMMENT '当前允许执行迁移的 Pixiv 账号 ID',
+  activated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最近一次账号激活时间',
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='跨进程账号迁移协调状态';
+
+CREATE TABLE account_migration_runs (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '收藏迁移任务本地主键',
+  target_user_id VARCHAR(32) NOT NULL COMMENT '目标 Pixiv 账号 ID',
+  automatic_key VARCHAR(32) COMMENT '自动任务按账号去重，手动任务为空',
+  status VARCHAR(16) NOT NULL DEFAULT 'pending' COMMENT '任务状态：等待、执行、暂停或完成',
+  scan_phase VARCHAR(16) NOT NULL DEFAULT 'works' COMMENT '本地清单扫描阶段：作品、合集、订阅或完成',
+  scan_cursor JSON COMMENT '本地清单分页扫描位置',
+  last_error VARCHAR(1000) COMMENT '最近一次安全错误摘要',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '任务创建时间',
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '任务最后更新时间',
+  finished_at DATETIME COMMENT '任务结束时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_account_migration_automatic (automatic_key),
+  KEY idx_account_migration_runs_target (target_user_id,status,id),
+  CONSTRAINT chk_account_run_status CHECK (status IN ('pending','running','paused','completed')),
+  CONSTRAINT chk_account_run_phase CHECK (scan_phase IN ('works','series','sources','done'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='按账号持久化的作品收藏与合集追更迁移任务';
+
+CREATE TABLE account_migration_items (
+  run_id BIGINT UNSIGNED NOT NULL COMMENT '所属迁移任务 ID',
+  kind VARCHAR(16) NOT NULL COMMENT '迁移对象类型：插画、小说、漫画合集或小说合集',
+  target_id VARCHAR(32) NOT NULL COMMENT 'Pixiv 作品或合集 ID',
+  status VARCHAR(16) NOT NULL DEFAULT 'pending' COMMENT '项目状态：等待、执行、成功、失败或跳过',
+  attempts INT NOT NULL DEFAULT 0 COMMENT '远端操作已尝试次数',
+  next_attempt_at DATETIME COMMENT '允许下次重试的时间',
+  last_error_type VARCHAR(64) COMMENT '最近一次错误类型',
+  last_error VARCHAR(1000) COMMENT '最近一次安全错误摘要',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '项目首次发现时间',
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '项目最后更新时间',
+  finished_at DATETIME COMMENT '项目结束时间',
+  PRIMARY KEY (run_id,kind,target_id),
+  KEY idx_account_migration_items_due (run_id,status,next_attempt_at),
+  CONSTRAINT fk_account_migration_item_run FOREIGN KEY (run_id) REFERENCES account_migration_runs(id) ON DELETE CASCADE,
+  CONSTRAINT chk_account_item_kind CHECK (kind IN ('illust','novel','series_manga','series_novel')),
+  CONSTRAINT chk_account_item_status CHECK (status IN ('pending','running','succeeded','failed','skipped'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='迁移项目的重试、幂等与失败记录';

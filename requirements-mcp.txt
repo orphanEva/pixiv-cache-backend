@@ -1,0 +1,4 @@
+# Lightweight stdio adapter; existing HTTP backend runs separately.
+mcp>=2.3,<3
+httpx>=0.28,<1
+pydantic-settings>=2.7,<3

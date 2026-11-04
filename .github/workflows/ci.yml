@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - run: pip install -e '.[dev]'
+      - run: pip install -e '.[dev,mcp]'
       - run: python -m compileall -q app tests scripts
       - run: pytest -q --ignore=tests/test_mysql_integration.py
 
@@ -62,8 +62,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build production image
         run: docker build -t pixiv-cache-backend:ci .
+      - name: Build lightweight MCP stdio adapter
+        run: |
+          docker build -f Dockerfile.mcp -t pixiv-cache-mcp:ci .
+          docker run --rm pixiv-cache-mcp:ci python -m app.mcp --version
       - name: Verify FFmpeg exists in image
         run: docker run --rm --entrypoint ffmpeg pixiv-cache-backend:ci -version
+      - name: Verify offline Ugoira MP4 conversion
+        run: docker run --rm -e PIXIV_REQUEST_INTERVAL_SECONDS=0 pixiv-cache-backend:ci python -m scripts.check_ugoira_conversion
       - name: Verify MySQL backup/restore client exists
         run: |
           docker run --rm --entrypoint sh pixiv-cache-backend:ci -c \
@@ -76,7 +82,7 @@ jobs:
         run: |
           set -e
           docker network create pixiv-ci
-          trap 'docker rm -f pixiv-ci-worker pixiv-ci-sync pixiv-ci-maintenance pixiv-ci-redis >/dev/null 2>&1 || true; docker network rm pixiv-ci >/dev/null 2>&1 || true' EXIT
+          trap 'docker rm -f pixiv-ci-worker pixiv-ci-sync pixiv-ci-maintenance pixiv-ci-media pixiv-ci-redis >/dev/null 2>&1 || true; docker network rm pixiv-ci >/dev/null 2>&1 || true' EXIT
           docker run -d --name pixiv-ci-redis --network pixiv-ci redis:7.4-alpine
 
           docker run -d --name pixiv-ci-worker --network pixiv-ci \
@@ -100,6 +106,8 @@ jobs:
             -e REDIS_URL=redis://pixiv-ci-redis:6379/0 \
             -e SCHEMA_CHECK_ON_STARTUP=false \
             -e SYNC_SCHEDULER_POLL_SECONDS=0 \
+            -e ACCOUNT_MIGRATION_ENABLED=false \
+            -e REMOTE_RECHECK_ENABLED=false \
             -e WORKER_HEARTBEAT_KEY=pixiv:sync:worker:healthy \
             pixiv-cache-backend:ci python -m app.workers.sync_worker
           sync_ok=0
@@ -131,5 +139,23 @@ jobs:
           done
           if [ "$maintenance_ok" != "1" ]; then
             docker logs pixiv-ci-maintenance
+            exit 1
+          fi
+
+          docker run -d --name pixiv-ci-media --network pixiv-ci \
+            -e REDIS_URL=redis://pixiv-ci-redis:6379/0 \
+            -e SCHEMA_CHECK_ON_STARTUP=false \
+            -e WORKER_HEARTBEAT_KEY=pixiv:media:worker:healthy \
+            pixiv-cache-backend:ci python -m app.workers.media_worker
+          media_ok=0
+          for i in $(seq 1 30); do
+            if docker exec pixiv-ci-media python scripts/check_worker_health.py; then
+              media_ok=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$media_ok" != "1" ]; then
+            docker logs pixiv-ci-media
             exit 1
           fi

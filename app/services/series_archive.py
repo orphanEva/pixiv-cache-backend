@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 import logging
+import asyncio
+from typing import Iterable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.pixivpy_client import PixivPyClient
+from app.core.config import get_settings
 from app.core.maintenance import require_writes_allowed
-from app.models.work import PixivWork, Series, SeriesMember, WorkType
+from app.models.work import PixivWork, Series, SeriesMember, SyncSource, WorkSource, WorkStatus, WorkType, normalize_work_kind
 from app.services.archive_jobs import ArchiveJobQueue
+from app.services.work_sources import upsert_work_sources
+from app.services.cache_service import now_utc, utc_naive
 
 logger = logging.getLogger(__name__)
 
@@ -20,16 +25,25 @@ class SeriesArchiveService:
         self.client = client
         self.queue = queue
 
-    async def enqueue(self, series_type: str, series_id: int, *, force_refresh: bool = True, only_missing: bool = False, source_id: int | None = None) -> dict:
+    async def enqueue(
+        self, series_type: str, series_id: int, *, force_refresh: bool = True,
+        bookmark_if_missing: bool = False, source_id: int | None = None,
+        source_ids: Iterable[int] | None = None, discovery: dict | None = None,
+        only_missing: bool = False,
+    ) -> dict:
         """发现全集后入库成员与批量投递任务，返回本次实际排队数量。"""
         if series_type not in ("novel", "manga") or series_id <= 0:
             raise ValueError("series_type must be novel/manga and series_id must be positive")
+        work_kind = normalize_work_kind(series_type)
         await require_writes_allowed(self.queue.redis)
-        discovery = (
-            await self.client.discover_novel_series(series_id)
-            if series_type == "novel"
-            else await self.client.discover_manga_series(series_id)
-        )
+        if discovery is None:
+            discovery = (
+                await self.client.discover_novel_series(series_id)
+                if series_type == "novel"
+                else await self.client.discover_manga_series(series_id)
+            )
+        await require_writes_allowed(self.queue.redis)
+        sources = ArchiveJobQueue._source_values(source_id, source_ids)
         works = discovery["works"]
         if not works:
             raise ValueError("Pixiv series returned no downloadable works")
@@ -61,15 +75,26 @@ class SeriesArchiveService:
         ).scalars().all()
         members = {item.work_id: item for item in existing}
         ids = [str(item["id"]) for item in works]
-        archived_ids = set((
+        archived = list((
             await self.session.execute(
-                select(PixivWork.id).where(
+                select(PixivWork).where(
+                    PixivWork.work_kind == work_kind,
                     PixivWork.id.in_(ids),
                     PixivWork.series_id == sid,
                     PixivWork.series_type == series_type,
                 )
             )
         ).scalars().all())
+        archived_ids = {work.id for work in archived}
+        ttl = get_settings().sync_work_recheck_ttl_seconds
+        now = now_utc()
+        recent_ids = {
+            work.id for work in archived
+            if not force_refresh and ttl > 0 and work.status == WorkStatus.ACTIVE
+            and work.last_checked_at is not None
+            and (now - utc_naive(work.last_checked_at)).total_seconds() < ttl
+        }
+        skipped_ids = recent_ids | (archived_ids if only_missing else set())
         for item in works:
             wid = str(item["id"])
             member = members.get(wid)
@@ -83,28 +108,32 @@ class SeriesArchiveService:
                 member.last_error = None
         # 必须在 Redis 投递之前提交 queued；否则 worker 可能先归档成功，
         # 之后 HTTP 请求又把数据库状态从 archived 覆盖回 queued。
-        pending = [item for item in works if not only_missing or str(item["id"]) not in archived_ids]
-        for item in pending:
+        for item in works:
             member = members[str(item["id"])]
-            member.status = "queued"
+            member.status = "archived" if member.work_id in skipped_ids else "queued"
             member.last_error = None
+        # Skipped cached members still belong to every requesting sync source.
+        if skipped_ids and sources:
+            await upsert_work_sources(self.session, skipped_ids, sources, work_kind=work_kind)
         await self.session.commit()
 
         count = 0
         dedup = 0
         # Redis 投递成功不可回滚；未投递的成员恢复为 discovered，可再次发起。
+        queued_works = [item for item in works if str(item["id"]) not in skipped_ids]
         try:
-            for item in pending:
+            for item in queued_works:
                 result = await self.queue.enqueue(
                     WorkType.NOVEL if series_type == "novel" else WorkType.MANGA,
                     int(item["id"]),
                     force_refresh=force_refresh,
-                    source_id=source_id,
+                    bookmark_if_missing=bookmark_if_missing,
+                    source_ids=sources,
                 )
                 dedup += int(bool(result.get("deduplicated")))
                 count += 1
-        except Exception:
-            for item in pending[count:]:
+        except (Exception, asyncio.CancelledError):
+            for item in queued_works[count:]:
                 members[str(item["id"])].status = "discovered"
             await self.session.commit()
             logger.exception("series_enqueue_failed", extra={
@@ -119,6 +148,7 @@ class SeriesArchiveService:
             "series_id": sid, "series_type": series_type,
             "discovered": len(works), "queued": count,
             "deduplicated": dedup, "already_archived": len(archived_ids),
+            "skipped_recent": len(recent_ids),
             "published_total": series.published_total,
             "discovery_complete": len(works) >= series.published_total,
         }

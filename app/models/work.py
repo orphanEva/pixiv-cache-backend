@@ -24,6 +24,20 @@ class WorkType(str, enum.Enum):
     NOVEL = "novel"
 
 
+def normalize_work_kind(value: WorkType | str) -> str:
+    kind = WorkType(value)
+    return "novel" if kind == WorkType.NOVEL else "illust"
+
+
+def work_identity(kind: WorkType | str, pixiv_id: int | str) -> tuple[str, str]:
+    return normalize_work_kind(kind), str(pixiv_id)
+
+
+def _default_work_kind(context) -> str:
+    params = context.get_current_parameters()
+    return normalize_work_kind(params.get("type") or params.get("work_type") or "illust")
+
+
 class WorkStatus(str, enum.Enum):
     ACTIVE = "active"
     DELETED = "deleted"
@@ -36,6 +50,10 @@ class WorkStatus(str, enum.Enum):
 class SyncSourceType(str, enum.Enum):
     AUTHOR = "author"
     BOOKMARKS = "bookmarks"
+    NOVEL_SERIES = "novel_series"
+    MANGA_SERIES = "manga_series"
+    FOLLOWED_SERIES = "followed_series"
+    # Preserve the legacy novel-only watchlist rows and HTTP route.
     WATCHLIST = "watchlist"
 
 
@@ -104,6 +122,7 @@ class Tag(Base):
 
 class PixivWork(Base):
     __tablename__ = "works"
+    work_kind: Mapped[str] = mapped_column(Enum("illust", "novel"), primary_key=True, default=_default_work_kind)
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     work_type: Mapped[WorkType] = mapped_column("type", db_enum(WorkType), nullable=False)
     status: Mapped[WorkStatus] = mapped_column(db_enum(WorkStatus), nullable=False, default=WorkStatus.ACTIVE)
@@ -125,12 +144,15 @@ class PixivWork(Base):
     version_token: Mapped[str] = mapped_column(String(64), nullable=False)
     current_version_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    next_recheck_at: Mapped[datetime | None] = mapped_column(DateTime)
     cached_at: Mapped[datetime] = mapped_column("created_at", DateTime, server_default=text("CURRENT_TIMESTAMP"))
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
     versions: Mapped[list["PixivVersion"]] = relationship(back_populates="work", cascade="all, delete-orphan")
     current_files: Mapped[list["CurrentFile"]] = relationship(back_populates="work", cascade="all, delete-orphan")
     __table_args__ = (
         Index("idx_type_status", "type", "status"),
+        Index("idx_work_recheck", "status", "next_recheck_at", "last_checked_at"),
+        CheckConstraint("(work_kind = 'novel' AND type = 'novel') OR (work_kind = 'illust' AND type IN ('illust','manga','ugoira'))", name="chk_work_namespace"),
         Index("idx_author_id", "author_id"),
         Index("idx_remote_update_at", "remote_update_at"),
         Index("idx_series_lookup", "series_type", "series_id", "series_order"),
@@ -146,8 +168,9 @@ class PixivWork(Base):
 
 class PixivVersion(Base):
     __tablename__ = "work_history"
+    work_kind: Mapped[str] = mapped_column(Enum("illust", "novel"), nullable=False)
     id: Mapped[int] = mapped_column("history_id", BigInteger().with_variant(MYSQL_BIGINT(unsigned=True), "mysql"), primary_key=True, autoincrement=True)
-    work_id: Mapped[str] = mapped_column(String(32), ForeignKey("works.id", ondelete="CASCADE"), nullable=False)
+    work_id: Mapped[str] = mapped_column(String(32), nullable=False)
     version_no: Mapped[int] = mapped_column("version_num", Integer, nullable=False)
     version_token: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -160,7 +183,9 @@ class PixivVersion(Base):
     created_at: Mapped[datetime] = mapped_column("archived_at", DateTime, nullable=False)
     work: Mapped["PixivWork"] = relationship(back_populates="versions")
     assets: Mapped[list["PixivAsset"]] = relationship(back_populates="version", cascade="all, delete-orphan")
-    __table_args__ = (UniqueConstraint("work_id", "version_num", name="uk_work_version"),)
+    __table_args__ = (
+        ForeignKeyConstraint(["work_kind", "work_id"], ["works.work_kind", "works.id"], ondelete="CASCADE", name="fk_wh_work_id"),
+        UniqueConstraint("work_kind", "work_id", "version_num", name="uk_work_version"),)
 
 
 class PixivAsset(Base):
@@ -180,8 +205,9 @@ class PixivAsset(Base):
 
 class CurrentFile(Base):
     __tablename__ = "work_files"
+    work_kind: Mapped[str] = mapped_column(Enum("illust", "novel"), nullable=False)
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    work_id: Mapped[str] = mapped_column(String(32), ForeignKey("works.id", ondelete="CASCADE"), nullable=False)
+    work_id: Mapped[str] = mapped_column(String(32), nullable=False)
     page_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     file_type: Mapped[str] = mapped_column(String(24), nullable=False)
     local_path: Mapped[str] = mapped_column("file_path", String(1000), nullable=False)
@@ -189,15 +215,20 @@ class CurrentFile(Base):
     sha256: Mapped[str | None] = mapped_column("file_hash", String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
     work: Mapped["PixivWork"] = relationship(back_populates="current_files")
-    __table_args__ = (UniqueConstraint("work_id", "page_index", "file_type", name="uk_work_file_identity"),)
+    __table_args__ = (
+        ForeignKeyConstraint(["work_kind", "work_id"], ["works.work_kind", "works.id"], ondelete="CASCADE", name="fk_wf_work_id"),
+        UniqueConstraint("work_kind", "work_id", "page_index", "file_type", name="uk_work_file_identity"),)
 
 
 class WorkTagRelation(Base):
     __tablename__ = "work_tag_relation"
-    work_id: Mapped[str] = mapped_column(String(32), ForeignKey("works.id", ondelete="CASCADE"), primary_key=True)
+    work_kind: Mapped[str] = mapped_column(Enum("illust", "novel"), primary_key=True)
+    work_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     tag_id: Mapped[int] = mapped_column(Integer().with_variant(MYSQL_INTEGER(unsigned=True), "mysql"), ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
 
+
+    __table_args__ = (ForeignKeyConstraint(["work_kind", "work_id"], ["works.work_kind", "works.id"], ondelete="CASCADE", name="fk_wtr_work_id"),)
 
 
 class SyncSource(Base):
@@ -216,6 +247,7 @@ class SyncSource(Base):
     )
     include_illust: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     include_novel: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    expand_series: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     interval_seconds: Mapped[int] = mapped_column(
         Integer().with_variant(MYSQL_INTEGER(unsigned=True), "mysql"),
@@ -223,6 +255,8 @@ class SyncSource(Base):
         default=21600,
     )
     frontier_json: Mapped[dict | None] = mapped_column(JSON)
+    scan_state_json: Mapped[dict | None] = mapped_column(JSON)
+    account_id: Mapped[str | None] = mapped_column(String(32))
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -245,9 +279,9 @@ class SyncSource(Base):
 
 class WorkSource(Base):
     __tablename__ = "work_sources"
+    work_kind: Mapped[str] = mapped_column(Enum("illust", "novel"), primary_key=True)
     work_id: Mapped[str] = mapped_column(
         String(32),
-        ForeignKey("works.id", ondelete="CASCADE"),
         primary_key=True,
     )
     source_id: Mapped[int] = mapped_column(
@@ -262,5 +296,59 @@ class WorkSource(Base):
         DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
     __table_args__ = (
+        ForeignKeyConstraint(["work_kind", "work_id"], ["works.work_kind", "works.id"], ondelete="CASCADE", name="fk_ws_work_id"),
+
         Index("idx_work_sources_source", "source_id", "last_seen_at"),
+    )
+
+
+class AccountMigrationState(Base):
+    __tablename__ = "account_migration_state"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    active_user_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    activated_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+
+
+class AccountMigrationRun(Base):
+    __tablename__ = "account_migration_runs"
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(MYSQL_BIGINT(unsigned=True), "mysql").with_variant(Integer(), "sqlite"),
+        primary_key=True, autoincrement=True,
+    )
+    target_user_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    automatic_key: Mapped[str | None] = mapped_column(String(32), unique=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    scan_phase: Mapped[str] = mapped_column(String(16), nullable=False, default="works")
+    scan_cursor: Mapped[dict | None] = mapped_column(JSON, default=dict)
+    last_error: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    __table_args__ = (
+        Index("idx_account_migration_runs_target", "target_user_id", "status", "id"),
+        CheckConstraint("status IN ('pending','running','paused','completed')", name="chk_account_run_status"),
+        CheckConstraint("scan_phase IN ('works','series','sources','done')", name="chk_account_run_phase"),
+    )
+
+
+class AccountMigrationItem(Base):
+    __tablename__ = "account_migration_items"
+    run_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(MYSQL_BIGINT(unsigned=True), "mysql").with_variant(Integer(), "sqlite"),
+        ForeignKey("account_migration_runs.id", ondelete="CASCADE"), primary_key=True,
+    )
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    target_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error_type: Mapped[str | None] = mapped_column(String(64))
+    last_error: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    __table_args__ = (
+        Index("idx_account_migration_items_due", "run_id", "status", "next_attempt_at"),
+        CheckConstraint("kind IN ('illust','novel','series_manga','series_novel')", name="chk_account_item_kind"),
+        CheckConstraint("status IN ('pending','running','succeeded','failed','skipped')", name="chk_account_item_status"),
     )

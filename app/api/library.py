@@ -91,10 +91,12 @@ async def get_work(
     include_content: bool = Query(False),
     include_raw_meta: bool = Query(False),
     include_paths: bool = Query(False),
+    kind: WorkType | None = Query(None, description="Specify novel or illust when both namespaces contain this ID"),
     session: AsyncSession = Depends(get_session),
 ):
     result = await service(session).get_work(
         pixiv_id,
+        kind=kind,
         include_content=include_content,
         include_raw_meta=include_raw_meta,
         include_paths=include_paths,
@@ -110,10 +112,12 @@ async def get_work_history(
     include_content: bool = Query(False),
     include_raw_meta: bool = Query(False),
     include_paths: bool = Query(False),
+    kind: WorkType | None = Query(None, description="Specify novel or illust when both namespaces contain this ID"),
     session: AsyncSession = Depends(get_session),
 ):
     result = await service(session).get_history(
         pixiv_id,
+        kind=kind,
         include_content=include_content,
         include_raw_meta=include_raw_meta,
         include_paths=include_paths,
@@ -133,11 +137,13 @@ async def get_work_version(
     include_content: bool = Query(False),
     include_raw_meta: bool = Query(False),
     include_paths: bool = Query(False),
+    kind: WorkType | None = Query(None, description="Specify novel or illust when both namespaces contain this ID"),
     session: AsyncSession = Depends(get_session),
 ):
     result = await service(session).get_version(
         pixiv_id,
         version_no,
+        kind=kind,
         include_content=include_content,
         include_raw_meta=include_raw_meta,
         include_paths=include_paths,
@@ -153,9 +159,10 @@ async def get_work_version(
 )
 async def refresh_work(
     pixiv_id: int,
+    kind: WorkType | None = Query(None, description="Specify novel or illust when both namespaces contain this ID"),
     session: AsyncSession = Depends(get_session),
 ):
-    work = await session.get(PixivWork, str(pixiv_id))
+    work = await service(session).resolve_work(pixiv_id, kind)
     if work is None:
         raise HTTPException(404, "Archived work not found")
     kind = WorkType.NOVEL if work.work_type == WorkType.NOVEL else WorkType.ILLUST
@@ -170,10 +177,12 @@ async def refresh_work(
 async def verify_work_integrity(
     pixiv_id: int,
     verify_hash: bool = Query(False),
+    kind: WorkType | None = Query(None, description="Specify novel or illust when both namespaces contain this ID"),
     session: AsyncSession = Depends(get_session),
 ):
     result = await service(session).verify_work(
         pixiv_id,
+        kind=kind,
         verify_hash=verify_hash,
     )
     if result is None:

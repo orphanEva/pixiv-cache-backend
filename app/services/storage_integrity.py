@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+from contextvars import copy_context
+from functools import partial
 import hashlib
 import shutil
 import time
@@ -10,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.maintenance import get_current_writer, require_writer_alive
 from app.models.work import PixivAsset, PixivVersion
 
 
@@ -32,7 +36,8 @@ class StorageIntegrityService:
         if not repair_safe:
             return report
 
-        repairs = self._repair_safe(collected)
+        await require_writer_alive()
+        repairs = await self._filesystem_thread(self._repair_safe, collected)
         after = self._report(
             await self._collect(verify_hash=verify_hash),
             verify_hash=verify_hash,
@@ -54,7 +59,9 @@ class StorageIntegrityService:
                 PixivVersion.version_no,
             ).join(PixivVersion, PixivAsset.version_id == PixivVersion.id)
         )).all()
+        return await self._filesystem_thread(self._collect_files, rows, verify_hash=verify_hash)
 
+    def _collect_files(self, rows, *, verify_hash: bool) -> dict:
         db_files: set[Path] = set()
         db_version_dirs: set[Path] = set()
         missing_files: list[Path] = []
@@ -125,6 +132,9 @@ class StorageIntegrityService:
         }
 
     def _repair_safe(self, data: dict) -> dict:
+        # Capture the actual lease before it can become closed. Looking it up
+        # again later would return None for a closed writer and omit the check.
+        writer = get_current_writer()
         now = time.time()
         deleted_parts: list[str] = []
         quarantined: list[str] = []
@@ -153,6 +163,8 @@ class StorageIntegrityService:
                 skipped_recent.append(str(path))
                 continue
             try:
+                if writer is not None:
+                    writer.check_alive()
                 path.unlink()
                 deleted_parts.append(str(path))
             except FileNotFoundError:
@@ -165,7 +177,11 @@ class StorageIntegrityService:
                 continue
             relative = path.relative_to(self.root)
             destination = quarantine_root / relative
+            if writer is not None:
+                writer.check_alive()
             destination.parent.mkdir(parents=True, exist_ok=True)
+            if writer is not None:
+                writer.check_alive()
             shutil.move(str(path), str(destination))
             quarantined.append(str(destination))
 
@@ -178,6 +194,30 @@ class StorageIntegrityService:
                 "root are never automatically changed."
             ),
         }
+
+    @staticmethod
+    async def _filesystem_thread(function, *args, **kwargs):
+        # SQL stays on the session's event loop; hashing, walking and repairs
+        # must leave that loop free to renew the maintenance writer lease.
+        # Keep the executor Future shielded even after repeated cancellations.
+        # An outer MaintenanceWriter must not exit while a thread can still
+        # mutate files. copy_context propagates its lease into the worker thread.
+        future = asyncio.get_running_loop().run_in_executor(
+            None, partial(copy_context().run, function, *args, **kwargs),
+        )
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            while not future.done():
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            if not future.cancelled():
+                future.exception()  # Retrieve a repair error without losing cancellation.
+            raise
 
     def _tree_has_recent_activity(
         self,
