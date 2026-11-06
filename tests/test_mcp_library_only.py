@@ -1,5 +1,7 @@
 """Offline regression tests for the default no-upstream MCP boundary."""
 import httpx
+import json
+from pathlib import Path
 import pytest
 from mcp import Client
 from mcp.server.mcpserver.exceptions import ToolError
@@ -65,3 +67,21 @@ def test_local_mode_explicit_opt_out(monkeypatch):
     monkeypatch.setenv("PIXIV_MCP_LIBRARY_ONLY", "false")
     assert MCPSettings(api_key=KEY).library_only is False
     assert MCPSettings(api_key=KEY, library_only=True).library_only is True
+
+
+async def test_documented_full_client_exposes_capabilities_without_backend_io(monkeypatch):
+    example = Path(__file__).resolve().parents[1] / "examples" / "mcp-client.json"
+    config = json.loads(example.read_text())["mcpServers"]["pixiv-cache"]
+    for key, value in config["env"].items():
+        monkeypatch.setenv(key, value)
+    settings = MCPSettings()
+    assert settings.library_only is False
+    assert settings.read_only is False
+    def reject(request):
+        pytest.fail("Discovery must not contact the backend or upstream")
+    server = create_server(settings, transport=httpx.MockTransport(reject))
+    async with Client(server) as client:
+        names = {tool.name for tool in (await client.list_tools()).tools}
+        assert {"search_library", "archive_work", "archive_series", "account_identity",
+                "get_job", "run_sync_source", "patch_sync_source"} <= names
+        await client.read_resource("pixiv://guide")
