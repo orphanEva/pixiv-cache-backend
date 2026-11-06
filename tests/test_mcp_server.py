@@ -31,7 +31,7 @@ async def test_protocol_tools_resource_and_local_read(mode):
         return httpx.Response(200, json={"items": [{"pixiv_id": 5, "title": "本地作品"}],
                                        "pagination": {"page": 1, "page_size": 20}})
 
-    server = create_server(MCPSettings(api_key=KEY), transport=httpx.MockTransport(handle))
+    server = create_server(MCPSettings(api_key=KEY, library_only=False), transport=httpx.MockTransport(handle))
     async with Client(server, mode=mode, read_timeout_seconds=10) as client:
         tools = (await client.list_tools()).tools
         names = {tool.name for tool in tools}
@@ -54,7 +54,7 @@ async def test_protocol_tools_resource_and_local_read(mode):
 
 async def test_read_only_discovery_hides_mutations_and_calls_are_blocked():
     calls = []
-    server = create_server(MCPSettings(api_key=KEY, read_only=True), transport=httpx.MockTransport(
+    server = create_server(MCPSettings(api_key=KEY, read_only=True, library_only=False), transport=httpx.MockTransport(
         lambda request: (calls.append(request), httpx.Response(200, json={}))[1]))
     async with Client(server) as client:
         tools = (await client.list_tools()).tools
@@ -66,7 +66,7 @@ async def test_read_only_discovery_hides_mutations_and_calls_are_blocked():
 
 
 async def test_http_failure_is_protocol_tool_error_and_has_no_backend_secret():
-    server = create_server(MCPSettings(api_key=KEY), transport=httpx.MockTransport(
+    server = create_server(MCPSettings(api_key=KEY, library_only=False), transport=httpx.MockTransport(
         lambda request: httpx.Response(401, text="token=production-secret " + KEY)))
     async with Client(server) as client:
         result = await client.call_tool("get_library_stats")
@@ -80,7 +80,7 @@ async def test_tool_input_validation_prevents_backend_calls():
     def handle(request):
         pytest.fail("Invalid parameters reached backend")
 
-    server = create_server(MCPSettings(api_key=KEY), transport=httpx.MockTransport(handle))
+    server = create_server(MCPSettings(api_key=KEY, library_only=False), transport=httpx.MockTransport(handle))
     async with Client(server) as client:
         for args in ({"pixiv_id": -1, "kind": "novel"}, {"pixiv_id": 1},
                      {"pixiv_id": 1, "kind": "../account"}):
@@ -154,3 +154,4 @@ def test_cli_help_and_version_need_no_credentials(tmp_path):
                                  capture_output=True, text=True, timeout=15)
         assert process.returncode == 0
         assert expected in process.stdout
+

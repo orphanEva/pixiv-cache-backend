@@ -9,6 +9,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Pixiv cache MCP server (stdio)")
     parser.add_argument("--version", action="version", version=f"pixiv-cache-mcp {__version__}")
     parser.add_argument("--read-only", action="store_true", help="Expose only query tools")
+    parser.add_argument("--library-only", action="store_true", help="Force local archived-library tools only (default)")
     options = parser.parse_args()
 
     try:
@@ -20,7 +21,12 @@ def main() -> None:
         raise SystemExit(2) from None
 
     try:
-        settings = MCPSettings(**({"read_only": True} if options.read_only else {}))
+        overrides = {}
+        if options.read_only:
+            overrides["read_only"] = True
+        if options.library_only:
+            overrides["library_only"] = True
+        settings = MCPSettings(**overrides)
     except ValidationError as exc:
         fields = sorted({str(error["loc"][0]) for error in exc.errors(include_input=False) if error["loc"]})
         print("Invalid MCP configuration: " + ", ".join(fields)
@@ -33,3 +39,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

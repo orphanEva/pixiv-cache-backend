@@ -12,6 +12,10 @@ from app.mcp.config import MCPSettings
 
 
 _SAFE_PATH = re.compile(r"/api/[A-Za-z0-9_/-]+\Z")
+_LOCAL_LIBRARY_PATH = re.compile(
+    r"/api/library/(?:works(?:/[1-9][0-9]*(?:/history|/versions/[1-9][0-9]*|/integrity)?)?"
+    r"|authors(?:/[1-9][0-9]*)?|tags|series(?:/(?:novel|manga)/[1-9][0-9]*)?|stats)\Z"
+)
 _SECRET_KEYS = {"apikey", "authorization", "cookie", "setcookie", "accesstoken",
                 "refreshtoken", "pixivcookie", "pixivrefreshtoken", "password"}
 
@@ -81,6 +85,8 @@ class BackendClient:
         if (method not in {"GET", "POST", "PATCH"} or not _SAFE_PATH.fullmatch(path)
                 or "//" in path or any(part in {".", ".."} for part in path.split("/"))):
             raise ToolError("不支持的后端操作。")
+        if self.settings.library_only and (method != "GET" or not _LOCAL_LIBRARY_PATH.fullmatch(path)):
+            raise ToolError("当前 MCP 为本地库模式，仅允许已有归档查询，禁止远端请求和任务操作。")
         if self.settings.read_only and method != "GET":
             raise ToolError("当前 MCP 为只读模式，无法提交变更。")
         if self._client is None:
@@ -124,3 +130,4 @@ class BackendClient:
             if method != "GET":
                 message += " 操作结果尚未确认，请先查询任务或同步源状态再重试。"
             raise ToolError(message) from None
+

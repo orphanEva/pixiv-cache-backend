@@ -1,5 +1,14 @@
 # MCP 接入
 
+## 默认安全边界：仅查询本地归档
+
+`PIXIV_MCP_LIBRARY_ONLY=true` 现在默认开启，只注册 library 查询工具，HTTP 客户端也只放行明确列出的 `/api/library/` GET 路由。启动参数 `--library-only` 可强制此模式，覆盖环境变量。缺失内容不会自动下载，不注册归档、同步、账号验证或任务操作。启动适配器不会启动后端/worker，也不会恢复已暂停的 Pixiv 同步。此模式不能停止在其他进程中已经运行的 worker。
+
+这是刻意比旧 `--read-only` 更严格的模式：旧只读模式仍允许 `account_identity` 访问 Pixiv，`list_jobs` 后端还可能清理 Redis 索引。因此仅 `readOnlyHint` 或仅禁止 POST 不能保证离线无副作用。需要外部请求或写操作时，必须明确授权后设置 `PIXIV_MCP_LIBRARY_ONLY=false`；若同时设置 `PIXIV_MCP_READ_ONLY=true`，仍仅隐藏写工具，但不保证不访问上游。不要在 Pixiv 自动同步暂停期间启用这些操作。
+
+以下完整工具目录及写入工作流仅在显式关闭本地库模式后适用。默认模式可直接查询已有后端，而非导出快照；要求后端 API 地址和已有 API Key，但不需要机器人访问数据库、Redis 或 Pixiv 凭据。
+
+
 v1.11 提供基于[官方 Python MCP SDK 2.x](https://py.sdk.modelcontextprotocol.io/) 的 **stdio 适配器**，依赖范围为 `mcp>=2.3,<3`。MCP 客户端启动适配器进程，通过标准输入、输出调用工具；适配器使用 HTTP API 访问现有后端。它不直接连接 MySQL、Redis 或 Pixiv，也不启动 HTTP 监听端口。
 
 后端需为 **v1.10 或更新版本，数据库 schema v9**。单独给已有后端增加 MCP 适配器不需要新表；但若已通过前次本地 v1.10 的旧脚本升级到 schema v9，本次合并远端小说追更功能后，须先手工执行 `sql/upgrades/v7_v9_sync_sources_compat.sql` 补齐兼容枚举，版本号保持 9。部署更旧后端时，先按[数据库指南](MANUAL_DATABASE_SETUP.md)完成原有升级。
@@ -39,6 +48,7 @@ python -m app.mcp
 | `PIXIV_MCP_BACKEND_URL` | `http://127.0.0.1:18081` | 后端 API 地址；不是 Pixiv 地址 |
 | `PIXIV_MCP_API_KEY` | 必填 | 至少 32 个字符，必须与后端 `API_KEY` 一致；通过 `X-API-Key` 发送 |
 | `PIXIV_MCP_TIMEOUT_SECONDS` | `60` | 单次后端 HTTP 请求的超时秒数 |
+| `PIXIV_MCP_LIBRARY_ONLY` | `true` | 默认仅本地 library 查询，禁止账号远端校验、任务及同步工具 |
 | `PIXIV_MCP_READ_ONLY` | `false` | 设为 `true` 时隐藏写工具，同时阻止适配器发送非 GET 请求 |
 | `PIXIV_MCP_MAX_RESPONSE_BYTES` | `8388608` | 单次后端响应大小上限，默认 8 MiB |
 
@@ -79,7 +89,8 @@ docker compose -f E:\Python\pixiv-cache-backend\docker-compose.yml -f E:\Python\
       "env": {
         "PIXIV_MCP_BACKEND_URL": "http://api:8000",
         "PIXIV_MCP_API_KEY": "REPLACE_WITH_YOUR_32_PLUS_CHARACTER_BACKEND_API_KEY",
-        "PIXIV_MCP_READ_ONLY": "false"
+        "PIXIV_MCP_LIBRARY_ONLY": "true",
+        "PIXIV_MCP_READ_ONLY": "true"
       }
     }
   }
@@ -156,8 +167,9 @@ MCP 的 HTTP 超时只限制提交或查询请求，不代表后台任务在该�
 - **HTTP 401/403：**检查 MCP 使用的密钥是否与后端 `API_KEY` 相同，并区分后端 API 鉴权失败与 Pixiv 账号权限错误。
 - **无法连接：**本机进程使用可访问的宿主地址；同一 Compose 网络的适配器使用 `http://api:8000`。检查后端是否已经运行。
 - **有任务号但一直排队：**用 `ops_status` 查看队列和冷却状态；默认状态包含归档、同步、维护 worker 的心跳，媒体队列需使用 `view="media_queue"`，媒体 worker 健康检查见 Compose。stdio 适配器本身不执行下载或转码。
-- **找不到写工具：**检查 `PIXIV_MCP_READ_ONLY`。只读模式会隐藏写工具，需要修改客户端配置并重启 MCP 会话才会重新列出。
+- **找不到写工具：**默认 `PIXIV_MCP_LIBRARY_ONLY=true` 有意隐藏全部非 library 工具。仅在明确允许远端请求/写入时才关闭它；`PIXIV_MCP_READ_ONLY=true` 还会隐藏写工具。更改配置后需要重启 MCP 会话。
 - **响应过大：**搜索接口可缩小分页；完整历史、文件列表或小说正文超过 HTTP 响应上限时，需调整上限，或先查询更小的记录。
 - **媒体链接无法直接在聊天界面打开：**受保护媒体同样需要后端鉴权。工具返回的文件地址不等于匿名公开下载链接，不能把 API 密钥拼进 URL。
 
 后端完整部署及功能说明见 [README](../README.md)、[同步源说明](SOURCE_SYNC.md) 和 [v1.10 可靠性说明](V1_10_RELIABILITY.md)。
+

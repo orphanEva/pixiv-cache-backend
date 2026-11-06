@@ -15,6 +15,8 @@ class MCPSettings(BaseSettings):
     api_key: SecretStr
     timeout_seconds: float = Field(default=60, ge=1, le=600)
     max_response_bytes: int = Field(default=8 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024)
+    # Fail closed: only already archived local library endpoints are exposed.
+    library_only: bool = True
     read_only: bool = False
 
     @field_validator("backend_url")
@@ -44,3 +46,4 @@ class MCPSettings(BaseSettings):
         if len(key) < 32 or any(ord(char) < 33 or ord(char) > 126 for char in key):
             raise ValueError("api_key must contain at least 32 printable ASCII characters without spaces")
         return value
+

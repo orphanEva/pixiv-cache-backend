@@ -15,7 +15,7 @@ KEY = "test-only-mcp-key-" + "x" * 32
 
 
 def settings(**overrides):
-    return MCPSettings(api_key=KEY, **overrides)
+    return MCPSettings(api_key=KEY, library_only=False, **overrides)
 
 
 @pytest.mark.parametrize("url", [
@@ -173,3 +173,4 @@ async def test_cancellation_propagates_and_closes_client():
         async with client:
             await client.request("POST", "/api/account/migrations")
     assert client._client is None
+
