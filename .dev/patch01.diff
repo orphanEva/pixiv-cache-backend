@@ -1,0 +1,336 @@
+diff --git a/.env.example b/.env.example
+index c2e2880..f1d9792 100644
+--- a/.env.example
++++ b/.env.example
+@@ -82,3 +82,13 @@ SYNC_FAILURE_RETRY_SECONDS=900
+ SYNC_MAX_PAGES_PER_RUN=1000
+ SYNC_FRONTIER_SIZE=50
+ SYNC_PAGE_DELAY_SECONDS=0.2
++
++# C 方案：外部访问默认关闭。收到平台警告时必须保持 false。
++# 只有获得允许后，才能设置 true 并通过 /api/ops/remote/resume 人工确认。
++PIXIV_REMOTE_ENABLED=false
++# 以下只是本地请求预算，不是 Pixiv 官方允许的速率。
++REMOTE_MIN_INTERVAL_SECONDS=10
++REMOTE_DAILY_REQUEST_LIMIT=200
++SYNC_TARGETS_PER_RUN=10
++SYNC_TARGET_LIMIT=5000
++SYNC_JOB_BUDGET=100
+diff --git a/README.md b/README.md
+index 206910d..1759ad9 100644
+--- a/README.md
++++ b/README.md
+@@ -1,5 +1,9 @@
+ # Pixiv Cache Backend
+ 
++> **当前版本 v1.9.0 / Schema v8：C 方案后端。** 新增关注作者发现、漫画追更、断点续扫和默认关闭的外部访问闸门。
++> 统一安装、升级和离线验收请先看 [C 方案手册](docs/C_PLAN_BACKEND.md)。下面的 v1.1–v1.8 段落保留为历史说明。
++> 已收到平台访问警告时，保持 `PIXIV_REMOTE_ENABLED=false`；本地管理功能不依赖开启此开关。
++
+ FastAPI + externally managed **MySQL 8** + Redis. Versioned, local Pixiv
+ illustration and novel cache built around the manually versioned `pixiv_archive` schema.
+ 
+@@ -575,7 +579,7 @@ POST /api/ops/jobs/{job_id}/replay
+ 
+ 最新 `sql/pixiv_archive.sql` 已为每张表、每个字段提供中文 COMMENT，
+ 适合直接在 DataGrip、Navicat 或 IDEA Database 查看。
+-当前程序要求 `schema_version=7`；新装使用最新 DDL，已有 v6 库通过 `sql/upgrades/v6_to_v7.sql` 升级。
++当前程序要求 `schema_version=8`；新装使用最新 DDL，已有 v6 库通过 `sql/upgrades/v6_to_v7.sql` 升级。
+ 
+ 
+ ## 自动备份小说追更列表（v1.8，Schema v7）
+@@ -597,4 +601,4 @@ curl -X POST -H "X-API-Key: $API_KEY" \
+ - 取消追更后，该合集不再被后续扫描；本地已经归档的文件不会删除。
+ - **这项功能需要现有数据库从 v6 升级至 v7。** 不要对有数据的库执行全量初始化 SQL。
+ - 接口为未公开的 Pixiv Web AJAX，真实账号的结构仍需现场验证；如 Cookie 失效或响应结构变化，任务明确失败，不会假称全集完成。
+-- 目前自动追更仅支持 **小说**；漫画追更列表和自动扫描所有关注作者尚未接入。
++- v1.8 只支持小说追更；当前 v1.9 已增加漫画追更与关注作者发现，见 C 方案手册。
+diff --git a/app/api/jobs.py b/app/api/jobs.py
+index 273beca..7bbcec5 100644
+--- a/app/api/jobs.py
++++ b/app/api/jobs.py
+@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
+ from fastapi import APIRouter, HTTPException, Query, status
+ 
+ from app.core.redis_client import get_redis
+-from app.core.errors import PixivRemoteError
++from app.core.errors import PixivRemoteError, RemoteAccessPaused
+ from app.db.session import get_session
+ from app.api.routes import get_client
+ from app.clients.pixivpy_client import PixivPyClient
+@@ -42,13 +42,16 @@ async def enqueue_series_archive(
+     series_type: Literal["novel", "manga"],
+     series_id: int,
+     force_refresh: bool = Query(True),
++    only_missing: bool = Query(True),
++    max_jobs: int = Query(100, ge=1, le=1000),
+     session: AsyncSession = Depends(get_session),
+     client: PixivPyClient = Depends(get_client),
+ ):
+     """手工下载整套小说或漫画系列，且将系列与成员写入 MySQL。"""
+     try:
+         return await SeriesArchiveService(session, client, queue()).enqueue(
+-            series_type, series_id, force_refresh=force_refresh
++            series_type, series_id, force_refresh=force_refresh,
++            only_missing=only_missing, max_jobs=max_jobs,
+         )
+     except ValueError as exc:
+         raise HTTPException(422, str(exc)) from exc
+@@ -72,6 +75,8 @@ async def enqueue_archive_job(
+     if expand_series:
+         try:
+             detected = await client.detect_series(kind, pixiv_id)
++        except RemoteAccessPaused:
++            raise
+         except Exception as exc:
+             logger.warning("series_detection_failed", extra={
+                 "pixiv_id": pixiv_id, "work_type": kind.value,
+diff --git a/app/api/ops.py b/app/api/ops.py
+index ee54e18..b339d8f 100644
+--- a/app/api/ops.py
++++ b/app/api/ops.py
+@@ -56,3 +56,28 @@ async def replay_ops_job(job_id: str):
+     if job is None:
+         raise HTTPException(404, "Archive job not found")
+     return job
++
++
++from pydantic import BaseModel
++from app.core.remote_control import RemoteControl
++
++
++class ResumeRequest(BaseModel):
++    acknowledgement: Literal["I_HAVE_PLATFORM_PERMISSION"]
++
++
++@router.get("/remote")
++async def remote_status():
++    """仅查询本地 Redis/环境控制状态，不会探测 Pixiv。"""
++    return await RemoteControl().status()
++
++
++@router.post("/remote/pause")
++async def pause_remote():
++    return await RemoteControl().pause("operator")
++
++
++@router.post("/remote/resume")
++async def resume_remote(body: ResumeRequest):
++    """需要环境总开关和明确人工确认；不是规避平台限制的开关。"""
++    return await RemoteControl().resume()
+diff --git a/app/api/sync.py b/app/api/sync.py
+index 5d4a440..2fdbc8a 100644
+--- a/app/api/sync.py
++++ b/app/api/sync.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ from datetime import timedelta
++from typing import Literal
+ 
+ from fastapi import APIRouter, Depends, HTTPException, Query, status
+ from pydantic import BaseModel, Field
+@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
+ from app.core.redis_client import get_redis
+ from app.core.config import get_settings
+ from app.db.session import get_session
+-from app.models.work import SyncRestrict, SyncSource, SyncSourceType
++from app.models.work import SyncRestrict, SyncSource, SyncSourceType, SyncTarget
+ from app.services.cache_service import now_utc
+ from app.services.sync_jobs import SyncJobQueue
+ 
+@@ -18,6 +19,7 @@ router = APIRouter(prefix="/api/sync", tags=["sync"])
+ 
+ 
+ class SyncSourcePatch(BaseModel):
++    max_items_per_run: int | None = Field(default=None, ge=1, le=1000)
+     enabled: bool | None = None
+     include_illust: bool | None = None
+     include_novel: bool | None = None
+@@ -44,6 +46,8 @@ def _source_dict(source: SyncSource) -> dict:
+         "enabled": source.enabled,
+         "interval_seconds": source.interval_seconds,
+         "frontier": source.frontier_json or {},
++        "account_id": source.account_id,
++        "max_items_per_run": source.max_items_per_run,
+         "next_run_at": source.next_run_at,
+         "last_run_at": source.last_run_at,
+         "last_success_at": source.last_success_at,
+@@ -63,6 +67,8 @@ async def _upsert_source(
+     include_novel: bool,
+     interval_seconds: int,
+     run_now: bool,
++    enabled: bool = True,
++    max_items_per_run: int = 100,
+ ):
+     existing = (
+         await session.execute(
+@@ -80,7 +86,8 @@ async def _upsert_source(
+             restrict_mode=restrict,
+             include_illust=include_illust,
+             include_novel=include_novel,
+-            enabled=True,
++            enabled=enabled,
++            max_items_per_run=max_items_per_run,
+             interval_seconds=interval_seconds,
+             next_run_at=now_utc() if run_now else now_utc() + timedelta(seconds=interval_seconds),
+         )
+@@ -89,14 +96,15 @@ async def _upsert_source(
+         existing.include_illust = include_illust
+         existing.include_novel = include_novel
+         existing.interval_seconds = interval_seconds
+-        existing.enabled = True
++        existing.enabled = enabled
++        existing.max_items_per_run = max_items_per_run
+         if run_now:
+             existing.next_run_at = now_utc()
+     await session.commit()
+     await session.refresh(existing)
+ 
+     payload = _source_dict(existing)
+-    if run_now:
++    if run_now and enabled:
+         payload["job"] = await SyncJobQueue(get_redis()).enqueue(existing.id)
+     return payload
+ 
+@@ -144,27 +152,117 @@ async def upsert_bookmark_source(
+     )
+ 
+ 
+-@router.post("/sources/watchlist/novel")
+-async def upsert_novel_watchlist_source(
++@router.post("/sources/watchlist/{series_type}")
++async def upsert_watchlist_source(
++    series_type: Literal["novel", "manga"],
+     interval_seconds: int = Query(21600, ge=300),
+-    run_now: bool = Query(True),
++    run_now: bool = Query(False),
++    enabled: bool = Query(False),
++    max_items_per_run: int = Query(100, ge=1, le=1000),
+     session: AsyncSession = Depends(get_session),
+ ):
+-    """订阅当前 Pixiv Web Cookie 账号的小说追更列表，自动补齐全集。"""
+-    if not get_settings().pixiv_cookie.strip():
+-        raise HTTPException(422, "Configure PIXIV_COOKIE before syncing the novel watchlist")
++    """注册追更来源，不探测真实账号。新增来源默认暂停。"""
++    if run_now and not enabled:
++        raise HTTPException(422, "run_now requires enabled=true; remote access is separately gated")
+     return await _upsert_source(
+-        session,
+-        source_type=SyncSourceType.WATCHLIST,
+-        remote_user_id="novel",
+-        restrict=SyncRestrict.PUBLIC,
+-        include_illust=False,
+-        include_novel=True,
+-        interval_seconds=interval_seconds,
+-        run_now=run_now,
++        session, source_type=SyncSourceType.WATCHLIST, remote_user_id=series_type,
++        restrict=SyncRestrict.PUBLIC, include_illust=series_type == "manga",
++        include_novel=series_type == "novel", interval_seconds=interval_seconds,
++        run_now=run_now, enabled=enabled, max_items_per_run=max_items_per_run,
++    )
++
++
++@router.post("/sources/following/{user_id}")
++async def upsert_following_source(
++    user_id: str,
++    restrict: SyncRestrict = Query(SyncRestrict.PUBLIC),
++    include_illust: bool = Query(True), include_novel: bool = Query(True),
++    interval_seconds: int = Query(21600, ge=300),
++    run_now: bool = Query(False), enabled: bool = Query(False),
++    max_items_per_run: int = Query(100, ge=1, le=1000),
++    session: AsyncSession = Depends(get_session),
++):
++    """定期发现关注作者，在 sync_targets 中独立维护，不覆盖手工作者来源。"""
++    if run_now and not enabled:
++        raise HTTPException(422, "run_now requires enabled=true")
++    return await _upsert_source(
++        session, source_type=SyncSourceType.FOLLOWING, remote_user_id=_validate_remote_user_id(user_id),
++        restrict=restrict, include_illust=include_illust, include_novel=include_novel,
++        interval_seconds=interval_seconds, run_now=run_now, enabled=enabled,
++        max_items_per_run=max_items_per_run,
+     )
+ 
+ 
++class CPlanRequest(BaseModel):
++    public_bookmarks: bool = True
++    private_bookmarks: bool = True
++    public_following: bool = True
++    private_following: bool = True
++    novel_watchlist: bool = True
++    manga_watchlist: bool = True
++    include_illust: bool = True
++    include_novel: bool = True
++    enabled: bool = False
++    interval_seconds: int = Field(default=21600, ge=300)
++    max_items_per_run: int = Field(default=100, ge=1, le=1000)
++
++
++@router.post("/plan/c")
++async def configure_c_plan(body: CPlanRequest, session: AsyncSession = Depends(get_session)):
++    """只创建/更新本地配置，不发 Pixiv 请求、不立即入队，默认全部暂停。"""
++    sources = []
++    selections = (
++        (body.public_bookmarks, SyncSourceType.BOOKMARKS, "self", SyncRestrict.PUBLIC),
++        (body.private_bookmarks, SyncSourceType.BOOKMARKS, "self", SyncRestrict.PRIVATE),
++        (body.public_following, SyncSourceType.FOLLOWING, "self", SyncRestrict.PUBLIC),
++        (body.private_following, SyncSourceType.FOLLOWING, "self", SyncRestrict.PRIVATE),
++        (body.novel_watchlist, SyncSourceType.WATCHLIST, "novel", SyncRestrict.PUBLIC),
++        (body.manga_watchlist, SyncSourceType.WATCHLIST, "manga", SyncRestrict.PUBLIC),
++    )
++    for selected, kind, remote_id, restrict in selections:
++        if not selected:
++            continue
++        sources.append(await _upsert_source(
++            session, source_type=kind, remote_user_id=remote_id, restrict=restrict,
++            include_illust=(remote_id == "manga") if kind == SyncSourceType.WATCHLIST else body.include_illust,
++            include_novel=(remote_id == "novel") if kind == SyncSourceType.WATCHLIST else body.include_novel,
++            interval_seconds=body.interval_seconds, run_now=False, enabled=body.enabled,
++            max_items_per_run=body.max_items_per_run,
++        ))
++    return {"sources": sources, "remote_requests_sent": 0}
++
++
++@router.get("/sources/{source_id}/targets")
++async def list_targets(source_id: int, page: int = Query(1, ge=1),
++    page_size: int = Query(50, ge=1, le=200), session: AsyncSession = Depends(get_session)):
++    from sqlalchemy import func
++    condition = SyncTarget.source_id == source_id
++    total = (await session.execute(select(func.count()).select_from(SyncTarget).where(condition))).scalar_one()
++    rows = (await session.execute(select(SyncTarget).where(condition)
++        .order_by(SyncTarget.target_type, SyncTarget.remote_id)
++        .offset((page - 1) * page_size).limit(page_size))).scalars().all()
++    return {"items": [{"source_id": r.source_id, "type": r.target_type, "remote_id": r.remote_id,
++        "active": r.active, "enabled": r.enabled, "last_checked_at": r.last_checked_at,
++        "last_success_at": r.last_success_at, "last_error": r.last_error,
++        "checkpoint": r.frontier_json or {}} for r in rows],
++        "page": page, "page_size": page_size, "total": total}
++
++
++class TargetPatch(BaseModel):
++    enabled: bool
++
++
++@router.patch("/sources/{source_id}/targets/{target_type}/{remote_id}")
++async def patch_target(source_id: int, target_type: Literal["author", "novel", "manga"],
++    remote_id: str, body: TargetPatch, session: AsyncSession = Depends(get_session)):
++    target = await session.get(SyncTarget, (source_id, target_type, remote_id))
++    if target is None:
++        raise HTTPException(404, "Subscription target not found")
++    target.enabled = body.enabled
++    await session.commit()
++    return {"source_id": source_id, "type": target_type, "remote_id": remote_id, "enabled": target.enabled}
++
++
+ @router.get("/sources")
+ async def list_sync_sources(session: AsyncSession = Depends(get_session)):
+     sources = (
+@@ -228,6 +326,8 @@ async def run_sync_source(
+     source = await session.get(SyncSource, source_id)
+     if source is None:
+         raise HTTPException(404, "Sync source not found")
++    if not source.enabled:
++        raise HTTPException(409, "Sync source is paused; full=true does not bypass pause")
+     return await SyncJobQueue(get_redis()).enqueue(source_id, full=full)
+ 
+ 
