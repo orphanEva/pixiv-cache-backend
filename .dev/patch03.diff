@@ -1,0 +1,275 @@
+diff --git a/app/clients/pixivpy_client.py b/app/clients/pixivpy_client.py
+index 1348597..72fb014 100644
+--- a/app/clients/pixivpy_client.py
++++ b/app/clients/pixivpy_client.py
+@@ -2,9 +2,13 @@ from __future__ import annotations
+ 
+ import asyncio
+ import time
++import re
++
++from app.core.remote_control import remote_request, RemoteControl
+ from typing import Any, NoReturn
+ 
+ from pixivpy3 import AppPixivAPI
++import requests
+ 
+ from app.clients.base import PixivClient
+ from app.clients.pixiv_mapper import (
+@@ -16,6 +20,7 @@ from app.clients.pixiv_mapper import (
+ from app.clients.pixiv_web_client import PixivWebClient
+ from app.core.config import get_settings
+ from app.core.errors import (
++    RemoteAccessPaused,
+     PixivAuthError,
+     PixivNotFoundError,
+     PixivRemoteError,
+@@ -35,7 +40,9 @@ class PixivPyClient(PixivClient):
+ 
+     def __init__(self) -> None:
+         self.settings = get_settings()
+-        self.api = AppPixivAPI()
++        self.api = AppPixivAPI(timeout=self.settings.download_timeout_seconds, allow_redirects=False)
++        # 只用普通 HTTP session，不使用 SDK 附带的 challenge 自动处理。
++        self.api.requests = requests.Session()
+         self.refresh_token = self.settings.pixiv_refresh_token.strip()
+         self.web = PixivWebClient(cookie=self.settings.pixiv_cookie)
+         self._auth_lock = asyncio.Lock()
+@@ -44,57 +51,71 @@ class PixivPyClient(PixivClient):
+ 
+     async def _invoke_api(self, func, *args, **kwargs):
+         async with self._api_lock:
+-            return await asyncio.to_thread(func, *args, **kwargs)
++            task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
++            try:
++                return await asyncio.shield(task)
++            except asyncio.CancelledError:
++                # to_thread 取消不了已发出的 HTTP；保持闸门/锁直到在途请求结束。
++                try:
++                    await task
++                except Exception:
++                    pass
++                raise
+ 
+     async def _ensure_auth(self, force: bool = False) -> None:
+         if not force and time.monotonic() < self._next_auth_at:
+             return
+-
+         async with self._auth_lock:
+             if not force and time.monotonic() < self._next_auth_at:
+                 return
+-
+             if not self.refresh_token:
+-                raise PixivAuthError("Pixiv App authentication unavailable: configure PIXIV_REFRESH_TOKEN")
++                raise RemoteAccessPaused("PIXIV_REFRESH_TOKEN is not configured")
+             try:
+-                await self._invoke_api(self.api.auth, refresh_token=self.refresh_token)
+-            except Exception:
+-                # Never expose upstream auth errors, which can contain secrets.
+-                raise PixivAuthError("Pixiv App authentication failed; update PIXIV_REFRESH_TOKEN") from None
+-
++                async with remote_request():
++                    await self._invoke_api(self.api.auth, refresh_token=self.refresh_token)
++            except RemoteAccessPaused:
++                raise
++            except Exception as exc:
++                # 网络错误不再一律伪装成 Token 失效；不输出带凭据的异常正文。
++                response = getattr(exc, "response", None)
++                code = getattr(response, "status_code", None)
++                message = str(exc).lower()
++                if code in (401, 403, 429) or re.search(r"http\s+(401|403|429)\b", message) or any(x in message for x in (
++                    "invalid_grant", "unauthorized", "invalid refresh", "rate limit", "429",
++                )):
++                    await RemoteControl().pause("oauth_rejected")
++                    raise RemoteAccessPaused("Pixiv authentication rejected; external access paused") from None
++                raise PixivUnavailableError(
++                    f"Pixiv authentication transport failed ({type(exc).__name__})"
++                ) from None
+             self._next_auth_at = time.monotonic() + 45 * 60
+ 
+     async def _call(self, func, *args, **kwargs):
+         await self._ensure_auth()
+         try:
+-            result = await self._invoke_api(func, *args, **kwargs)
++            async with remote_request():
++                result = await self._invoke_api(func, *args, **kwargs)
+             self._raise_for_pixiv_error(result)
+             return result
+-        except PixivAuthError:
++        except RemoteAccessPaused:
++            raise
++        except (PixivAuthError, PixivRestrictedError):
+             self._next_auth_at = 0.0
+-            await self._ensure_auth(force=True)
+-            try:
+-                result = await self._invoke_api(func, *args, **kwargs)
+-                self._raise_for_pixiv_error(result)
+-                return result
+-            except PixivRemoteError:
+-                raise
+-            except Exception as retry_exc:
+-                self._raise_mapped_exception(retry_exc)
++            await RemoteControl().pause("app_access_rejected")
++            raise RemoteAccessPaused("Pixiv rejected access; manual review required") from None
++        except PixivUnavailableError as exc:
++            if any(x in str(exc).lower() for x in ("429", "rate limit", "too many requests")):
++                await RemoteControl().pause("app_rate_limited")
++                raise RemoteAccessPaused("Pixiv rate limit; external access paused") from None
++            raise
+         except PixivRemoteError:
+             raise
+         except Exception as exc:
+-            if self._exception_is_auth(exc):
+-                self._next_auth_at = 0.0
+-                await self._ensure_auth(force=True)
+-                try:
+-                    result = await self._invoke_api(func, *args, **kwargs)
+-                    self._raise_for_pixiv_error(result)
+-                    return result
+-                except PixivRemoteError:
+-                    raise
+-                except Exception as retry_exc:
+-                    self._raise_mapped_exception(retry_exc)
++            response = getattr(exc, "response", None)
++            code = getattr(response, "status_code", None)
++            if code in (401, 403, 429) or self._exception_is_auth(exc):
++                await RemoteControl().pause("app_access_rejected")
++                raise RemoteAccessPaused("Pixiv access rejected; external access paused") from None
+             self._raise_mapped_exception(exc)
+ 
+     @staticmethod
+@@ -200,6 +221,8 @@ class PixivPyClient(PixivClient):
+                     snapshot.series_id = series["id"]
+                     snapshot.series_order = series.get("order")
+                     snapshot.metadata["series"] = series
++            except RemoteAccessPaused:
++                raise
+             except Exception:
+                 # Series detection must not prevent an otherwise valid single-work archive.
+                 pass
+@@ -224,8 +247,12 @@ class PixivPyClient(PixivClient):
+                 await self._ensure_auth(force=True)
+                 authenticated = True
+                 state = "ok"
++            except RemoteAccessPaused:
++                state = "remote_paused"
+             except PixivAuthError:
+                 state = "authentication_failed"
++            except PixivUnavailableError:
++                state = "network_or_response_error"
+         web = await self.web.check_auth()
+         return {
+             "app_api": {"configured": configured, "authenticated": authenticated, "status": state},
+@@ -238,12 +265,9 @@ class PixivPyClient(PixivClient):
+         return await self.auth_status()
+ 
+     async def get_novel_snapshot(self, pixiv_id: int) -> RemoteSnapshot:
+-        # gather() is kept so callers do not depend on ordering, while _api_lock
+-        # guarantees the shared PixivPy instance itself is never used concurrently.
+-        detail_result, text_result = await asyncio.gather(
+-            self._call(self.api.novel_detail, pixiv_id),
+-            self._call(self.api.novel_text, pixiv_id),
+-        )
++        # 顺序执行，认证/限流失败后不遗留仍在运行的另一个协程。
++        detail_result = await self._call(self.api.novel_detail, pixiv_id)
++        text_result = await self._call(self.api.novel_text, pixiv_id)
+         detail = to_dict(detail_result)
+         novel = detail.get("novel") if isinstance(detail, dict) and "novel" in detail else detail
+         return build_novel_snapshot(novel, text_result, pixiv_id)
+@@ -453,3 +477,33 @@ class PixivPyClient(PixivClient):
+         if next_url:
+             next_params = await self._invoke_api(self.api.parse_qs, next_url)
+         return DiscoveryPage(items=items, next_params=next_params)
++
++    async def discover_following_page(self, user_id: int, restrict: str, next_params: dict | None = None) -> dict:
++        """只读取关注列表；不会在 Pixiv 上关注/取消关注任何用户。"""
++        from urllib.parse import urlparse, parse_qs
++        offset = int((next_params or {}).get("offset", 0))
++        if offset < 0 or restrict not in ("public", "private"):
++            raise ValueError("Invalid following cursor")
++        data = to_dict(await self._call(
++            self.api.user_following, user_id, restrict=restrict, offset=offset
++        ))
++        if not isinstance(data, dict) or not isinstance(data.get("user_previews"), list):
++            raise ValueError("Unknown Pixiv following response")
++        ids = []
++        for preview in data["user_previews"]:
++            uid = (preview.get("user") or {}).get("id") if isinstance(preview, dict) else None
++            if isinstance(uid, bool) or not str(uid or "").isdigit() or int(uid) <= 0:
++                raise ValueError("Following response has invalid user ID")
++            ids.append(str(uid))
++        next_url = data.get("next_url")
++        cursor = None
++        if next_url:
++            url = urlparse(next_url)
++            if url.scheme != "https" or url.hostname != "app-api.pixiv.net" or url.path != "/v1/user/following":
++                raise ValueError("Untrusted following cursor")
++            query = parse_qs(url.query)
++            next_offset = int(query.get("offset", ["-1"])[0])
++            if next_offset <= offset or not ids:
++                raise ValueError("Following pagination did not advance")
++            cursor = {"offset": next_offset}
++        return {"ids": ids, "next_params": cursor}
+diff --git a/app/clients/subscription_parser.py b/app/clients/subscription_parser.py
+new file mode 100644
+index 0000000..0f6f544
+--- /dev/null
++++ b/app/clients/subscription_parser.py
+@@ -0,0 +1,57 @@
++"""非公开 Web 接口的显式结构解析；不把作品缩略图 ID 猜成合集 ID。"""
++from __future__ import annotations
++
++
++def positive_id(value) -> str:
++    if isinstance(value, bool) or not str(value or "").isdigit() or int(value) <= 0:
++        raise ValueError("Invalid remote ID")
++    return str(int(value))
++
++
++def parse_watchlist_page(payload: dict, kind: str, page_number: int) -> dict:
++    body = payload.get("body")
++    if kind not in ("novel", "manga") or not isinstance(body, dict):
++        raise ValueError("Unknown watchlist body")
++    page = body.get("page") if isinstance(body.get("page"), dict) else {}
++    ids = page.get("watchedSeriesIds")
++    if ids is not None:
++        if not isinstance(ids, list):
++            raise ValueError("Invalid watchedSeriesIds")
++        result = [int(positive_id(x)) for x in ids]
++    else:
++        containers = [page, body]
++        thumbnails = body.get("thumbnails")
++        if kind == "novel" and isinstance(thumbnails, dict):
++            containers.append(thumbnails)
++        keys = ("novelSeries", "novel_series", "series", "seriesList") if kind == "novel" else ("illustSeries", "mangaSeries", "series", "seriesList")
++        entries = next((c[k] for c in containers for k in keys if isinstance(c.get(k), list)), None)
++        if entries is None:
++            raise ValueError("Unknown watchlist response: no series list")
++        result = []
++        for entry in entries:
++            if not isinstance(entry, dict):
++                raise ValueError("Invalid watchlist series entry")
++            nested = entry.get("series") or {}
++            if not isinstance(nested, dict):
++                raise ValueError("Invalid nested series")
++            value = entry.get("seriesId") or entry.get("novelSeriesId") or entry.get("series_id") or nested.get("id") or entry.get("id")
++            result.append(int(positive_id(value)))
++    if len(result) != len(set(result)):
++        raise ValueError("Duplicate series IDs within watchlist page")
++    has_next = None
++    for c in (page, body):
++        for key in ("hasNextPage", "hasNext", "has_next"):
++            if isinstance(c.get(key), bool):
++                has_next = c[key]
++                break
++        maximum = c.get("maxPage", c.get("lastPage"))
++        if maximum is not None:
++            maximum = int(maximum)
++            if maximum < 0:
++                raise ValueError("Invalid watchlist page count")
++            has_next = page_number < maximum
++        if has_next is not None:
++            break
++    if not result and has_next is True:
++        raise ValueError("Empty watchlist page claims more pages")
++    return {"series_ids": result, "has_next": has_next}
