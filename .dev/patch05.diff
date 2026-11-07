@@ -1,0 +1,46 @@
+diff --git a/app/services/series_archive.py b/app/services/series_archive.py
+index 3931338..b6c9a63 100644
+--- a/app/services/series_archive.py
++++ b/app/services/series_archive.py
+@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from app.clients.pixivpy_client import PixivPyClient
+ from app.core.maintenance import require_writes_allowed
++from app.core.config import get_settings
+ from app.models.work import PixivWork, Series, SeriesMember, WorkType
+ from app.services.archive_jobs import ArchiveJobQueue
+ 
+@@ -20,7 +21,7 @@ class SeriesArchiveService:
+         self.client = client
+         self.queue = queue
+ 
+-    async def enqueue(self, series_type: str, series_id: int, *, force_refresh: bool = True, only_missing: bool = False, source_id: int | None = None) -> dict:
++    async def enqueue(self, series_type: str, series_id: int, *, force_refresh: bool = True, only_missing: bool = False, source_id: int | None = None, max_jobs: int | None = None, skip_ids: list[str] | None = None) -> dict:
+         """发现全集后入库成员与批量投递任务，返回本次实际排队数量。"""
+         if series_type not in ("novel", "manga") or series_id <= 0:
+             raise ValueError("series_type must be novel/manga and series_id must be positive")
+@@ -83,7 +84,13 @@ class SeriesArchiveService:
+                 member.last_error = None
+         # 必须在 Redis 投递之前提交 queued；否则 worker 可能先归档成功，
+         # 之后 HTTP 请求又把数据库状态从 archived 覆盖回 queued。
+-        pending = [item for item in works if not only_missing or str(item["id"]) not in archived_ids]
++        skipped = set(skip_ids or [])
++        eligible = [item for item in works if str(item["id"]) not in skipped
++                    and (not only_missing or str(item["id"]) not in archived_ids)]
++        limit = max_jobs if max_jobs is not None else get_settings().sync_job_budget
++        if limit <= 0:
++            raise ValueError("max_jobs must be positive")
++        pending = eligible[:limit]
+         for item in pending:
+             member = members[str(item["id"])]
+             member.status = "queued"
+@@ -121,6 +128,9 @@ class SeriesArchiveService:
+             "deduplicated": dedup, "already_archived": len(archived_ids),
+             "published_total": series.published_total,
+             "discovery_complete": len(works) >= series.published_total,
++            "continuation_pending": len(eligible) > len(pending),
++            "remaining": max(0, len(eligible) - len(pending)),
++            "submitted": [str(item["id"]) for item in pending],
+         }
+ 
+     async def status(self, series_type: str, series_id: int) -> dict:
