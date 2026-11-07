@@ -1,0 +1,153 @@
+diff --git a/app/clients/pixiv_web_client.py b/app/clients/pixiv_web_client.py
+index 63ddbbf..c362c53 100644
+--- a/app/clients/pixiv_web_client.py
++++ b/app/clients/pixiv_web_client.py
+@@ -6,6 +6,8 @@ from typing import Any
+ import httpx
+ 
+ from app.core.config import get_settings
++from app.core.remote_control import remote_request, check_remote_response
++from app.core.errors import RemoteAccessPaused
+ 
+ 
+ @dataclass(slots=True)
+@@ -64,11 +66,13 @@ class PixivWebClient:
+         async with httpx.AsyncClient(
+             base_url="https://www.pixiv.net",
+             headers=headers,
+-            follow_redirects=True,
++            follow_redirects=False,
+             timeout=httpx.Timeout(self.settings.download_timeout_seconds),
+             transport=self._transport,
+         ) as client:
+-            response = await client.get(path)
++            async with remote_request():
++                response = await client.get(path)
++                await check_remote_response(response.status_code, response.headers.get("retry-after"))
+             response.raise_for_status()
+             payload = response.json()
+         if not isinstance(payload, dict):
+@@ -85,6 +89,8 @@ class PixivWebClient:
+             if payload.get("body") is None:
+                 return AuthProbe(True, False, "unexpected_response")
+             return AuthProbe(True, True, "ok")
++        except RemoteAccessPaused:
++            return AuthProbe(True, False, "remote_paused")
+         except httpx.HTTPStatusError as exc:
+             code = exc.response.status_code
+             return AuthProbe(
+@@ -168,78 +174,41 @@ class PixivWebClient:
+ 
+ 
+     async def get_watched_novel_series_page(self, page: int) -> dict[str, Any]:
+-        """读取当前账号追更的小说合集。Pixiv Web AJAX 非公开接口；未知结构明确失败。
+-
+-        不把小说作品 ID 当合集 ID，也不把 Cookie 失效时的空响应当空列表。
+-        """
+-        from app.core.errors import PixivAuthError, PixivUnavailableError
+-
++        return await self.get_watched_series_page("novel", page)
++
++    async def get_watched_series_page(self, series_type: str, page: int) -> dict[str, Any]:
++        """查询完整追更列表；不使用可能过滤已读项目的 new 参数。"""
++        from app.core.errors import PixivAuthError
++        from app.clients.subscription_parser import parse_watchlist_page
++        if series_type not in ("novel", "manga") or page < 1:
++            raise ValueError("Invalid watchlist type or page")
+         if not self.configured:
+-            raise PixivAuthError("PIXIV_COOKIE is required to sync the novel watchlist")
+-        if page < 1:
+-            raise ValueError("Watchlist page must be positive")
+-        try:
+-            payload = await self._get_json(
+-                f"/ajax/watch_list/novel?p={page}&new=1&lang=zh",
+-                referer="https://www.pixiv.net/following/watchlist/novels",
+-            )
+-        except httpx.HTTPStatusError as exc:
+-            if exc.response.status_code in (401, 403):
+-                raise PixivAuthError("Pixiv Web cookie was rejected when reading the watchlist") from None
+-            raise PixivUnavailableError("Pixiv watchlist API returned an HTTP error") from exc
+-        except (httpx.HTTPError, ValueError) as exc:
+-            raise PixivUnavailableError("Pixiv watchlist API is unreachable or returned invalid JSON") from exc
+-
+-        if payload.get("error") is True:
+-            raise PixivAuthError("Pixiv rejected the novel watchlist request; verify PIXIV_COOKIE")
++            raise PixivAuthError("PIXIV_COOKIE is required for watchlist synchronization")
++        payload = await self._get_json(
++            f"/ajax/watch_list/{series_type}?p={page}&lang=zh",
++            referer="https://www.pixiv.net/following/watchlist/" + ("novels" if series_type == "novel" else "manga"),
++        )
++        if payload.get("error"):
++            from app.core.remote_control import RemoteControl
++            await RemoteControl().pause("watchlist_rejected")
++            raise RemoteAccessPaused("Watchlist rejected; check account access manually")
++        return parse_watchlist_page(payload, series_type, page)
++
++    async def get_authenticated_user_id(self) -> str:
++        """通过登录必需接口确认 Cookie 所属账号，避免换号后误解绑历史来源。"""
++        from app.core.errors import PixivAuthError
++        import re
++        if not self.configured:
++            raise PixivAuthError("PIXIV_COOKIE is required")
++        payload = await self._get_json("/ajax/user/extra")
+         body = payload.get("body")
+-        if not isinstance(body, dict):
+-            raise ValueError("Unknown novel watchlist response: missing body")
+-
+-        # 数据格式可能随 Pixiv Web 前端调整；只认可明确标记为系列的数组。
+-        containers = [body]
+-        for key in ("page", "data"):
+-            if isinstance(body.get(key), dict):
+-                containers.append(body[key])
+-        entries = None
+-        for container in containers:
+-            for key in ("novelSeries", "novel_series", "series", "seriesList", "watchList", "watchlist"):
+-                if isinstance(container.get(key), list):
+-                    entries = container[key]
+-                    break
+-            if entries is not None:
+-                break
+-        if entries is None:
+-            raise ValueError("Unknown novel watchlist response: no series list")
+-
+-        result: list[int] = []
+-        seen: set[int] = set()
+-        for item in entries:
+-            if not isinstance(item, dict):
+-                raise ValueError("Unknown novel watchlist entry")
+-            nested = item.get("series")
+-            sid = item.get("seriesId") or item.get("novelSeriesId") or item.get("series_id")
+-            if not sid and isinstance(nested, dict):
+-                sid = nested.get("id") or nested.get("seriesId")
+-            if not sid and "id" in item:
+-                sid = item["id"]  # 仅当所在列表明确是系列列表时接受
+-            if isinstance(sid, bool) or not str(sid or "").isdigit() or int(sid) <= 0:
+-                raise ValueError("Unknown novel watchlist entry: missing series ID")
+-            sid = int(sid)
+-            if sid not in seen:
+-                seen.add(sid)
+-                result.append(sid)
+-
+-        has_next = None
+-        for container in containers:
+-            for key in ("hasNextPage", "hasNext", "has_next"):
+-                if isinstance(container.get(key), bool):
+-                    has_next = container[key]
+-                    break
+-            if has_next is not None:
+-                break
+-            last_page = container.get("lastPage") or container.get("last_page")
+-            if isinstance(last_page, int) and not isinstance(last_page, bool):
+-                has_next = page < last_page
+-                break
+-        return {"series_ids": result, "has_next": has_next}
++        if payload.get("error") or not isinstance(body, dict) or not body:
++            raise PixivAuthError("Unable to validate Pixiv Web session")
++        uid = body.get("userId") or body.get("user_id")
++        # 已验证有效会话后，可使用 PHPSESSID 数字账号前缀；不保存完整 Cookie。
++        if not uid:
++            match = re.search(r"(?:^|;\s*)PHPSESSID=(\d+)_", self.cookie)
++            uid = match.group(1) if match else None
++        if not str(uid or "").isdigit() or int(uid) <= 0:
++            raise ValueError("Unable to bind Web account identity")
++        return str(uid)
