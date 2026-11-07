@@ -1,0 +1,20 @@
+name: c-plan-source
+on:
+  push:
+    branches: [feature/c-plan-backend-safe-sync]
+    paths: [.github/workflows/c-plan-source.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: git archive --format=zip HEAD -o tracked-source.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tracked-source
+          path: tracked-source.zip
+          retention-days: 1
