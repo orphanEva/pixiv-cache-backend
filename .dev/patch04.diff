@@ -1,0 +1,291 @@
+diff --git a/app/core/config.py b/app/core/config.py
+index 608225b..879eded 100644
+--- a/app/core/config.py
++++ b/app/core/config.py
+@@ -1,6 +1,7 @@
+ from functools import lru_cache
+ from pathlib import Path
+ from pydantic_settings import BaseSettings, SettingsConfigDict
++from pydantic import Field
+ 
+ 
+ class Settings(BaseSettings):
+@@ -11,6 +12,14 @@ class Settings(BaseSettings):
+     schema_check_on_startup: bool = True
+ 
+     # Pixiv App/Web authentication is token/cookie-only (no password login).
++    # 总开关默认关闭：只做本地管理/测试时不会访问 Pixiv。
++    pixiv_remote_enabled: bool = False
++    remote_control_key: str = "pixiv:remote:control"
++    remote_min_interval_seconds: float = Field(default=10.0, ge=1.0)
++    remote_daily_request_limit: int = Field(default=200, ge=1, le=10000)
++    sync_targets_per_run: int = Field(default=10, ge=1, le=100)
++    sync_target_limit: int = Field(default=5000, ge=1, le=20000)
++    sync_job_budget: int = Field(default=100, ge=1, le=1000)
+     pixiv_refresh_token: str = ""
+     pixiv_cookie: str = ""
+     log_level: str = "INFO"
+diff --git a/app/core/errors.py b/app/core/errors.py
+index 3455801..d5c77fe 100644
+--- a/app/core/errors.py
++++ b/app/core/errors.py
+@@ -34,6 +34,12 @@ class PixivUnavailableError(PixivRemoteError):
+     status_code = 503
+ 
+ 
++class RemoteAccessPaused(PixivRemoteError):
++    """外部访问被人工暂停、熔断或预算保护阻止；不代表作品失效。"""
++
++    status_code = 503
++
++
+ class ArchiveStorageError(PixivRemoteError):
+     """本地归档存储不可写或剩余空间不足。"""
+ 
+diff --git a/app/core/logging.py b/app/core/logging.py
+index c8f00a7..829275f 100644
+--- a/app/core/logging.py
++++ b/app/core/logging.py
+@@ -33,7 +33,8 @@ class JsonFormatter(logging.Formatter):
+             "pixiv_id", "work_type", "source", "version", "job_id",
+             "series_id", "series_type", "kind", "queued", "count",
+             "deduplicated", "error_type", "attempts", "status_code",
+-            "duration_ms", "method", "path", "consumer",
++            "duration_ms", "method", "path", "consumer", "source_id", "schema_version",
++            "processed", "remaining", "continuation_pending", "targets_processed",
+         ):
+             value = getattr(record, key, None)
+             if value is not None:
+diff --git a/app/core/remote_control.py b/app/core/remote_control.py
+new file mode 100644
+index 0000000..747ed5c
+--- /dev/null
++++ b/app/core/remote_control.py
+@@ -0,0 +1,108 @@
++"""跨进程外部访问闸门。默认关闭，任何检查失败都不放行。
++
++环境开关 + Redis 人工确认同时满足才允许访问；限速不代表 Pixiv 授权。
++"""
++from __future__ import annotations
++
++import asyncio
++import json
++from contextlib import asynccontextmanager
++from datetime import datetime, timezone
++
++from app.core.config import get_settings
++from app.core.errors import RemoteAccessPaused
++from app.core.redis_client import get_redis
++from app.core.redis_lock import RenewingRedisLock
++
++
++class RemoteControl:
++    def __init__(self, redis_client=None):
++        self.settings = get_settings()
++        self.redis = redis_client if redis_client is not None else get_redis()
++        self.key = self.settings.remote_control_key
++
++    async def status(self) -> dict:
++        raw = await self.redis.get(self.key)
++        state = json.loads(raw) if raw else {"paused": True, "reason": "not_approved"}
++        return {
++            **state,
++            "environment_enabled": self.settings.pixiv_remote_enabled,
++            "allowed": self.settings.pixiv_remote_enabled and state.get("paused") is False,
++            "min_interval_seconds": self.settings.remote_min_interval_seconds,
++            "daily_request_limit": self.settings.remote_daily_request_limit,
++        }
++
++    async def require_allowed(self) -> None:
++        if not self.settings.pixiv_remote_enabled:
++            raise RemoteAccessPaused("Remote access disabled by PIXIV_REMOTE_ENABLED")
++        try:
++            state = await self.status()
++        except Exception:
++            raise RemoteAccessPaused("Remote control unavailable; refusing outbound requests") from None
++        if not state["allowed"]:
++            raise RemoteAccessPaused("Remote access paused: " + str(state.get("reason", "operator")))
++
++    async def pause(self, reason: str = "operator") -> dict:
++        # 只接受调用方生成的安全原因码，不保存上游响应/Token/Cookie。
++        state = {"paused": True, "reason": reason[:80], "updated_at": datetime.now(timezone.utc).isoformat()}
++        await self.redis.set(self.key, json.dumps(state))
++        return state
++
++    async def resume(self) -> dict:
++        if not self.settings.pixiv_remote_enabled:
++            raise RemoteAccessPaused("Set PIXIV_REMOTE_ENABLED only after platform approval; restart all processes")
++        state = {"paused": False, "reason": "operator_confirmed", "updated_at": datetime.now(timezone.utc).isoformat()}
++        await self.redis.set(self.key, json.dumps(state))
++        return state
++
++    @asynccontextmanager
++    async def request(self):
++        """元数据、OAuth、Web、媒体下载共用锁和请求预算；不跨过远端限流。"""
++        await self.require_allowed()
++        lock = RenewingRedisLock(self.redis, self.key + ":request-lock", ttl_seconds=180, wait_seconds=30)
++        try:
++            acquired = await lock.acquire()
++        except Exception:
++            raise RemoteAccessPaused("Remote request gate unavailable") from None
++        if not acquired:
++            raise RemoteAccessPaused("Remote request gate busy; request was not sent")
++        try:
++            while True:
++                await self.require_allowed()
++                seconds, micros = await self.redis.time()
++                now = float(seconds) + float(micros) / 1e6
++                next_at = float(await self.redis.get(self.key + ":next-at") or 0)
++                delay = next_at - now
++                if delay <= 0:
++                    break
++                await asyncio.sleep(min(delay, 1.0))
++                lock.ensure_alive()
++            day = datetime.fromtimestamp(now, timezone.utc).strftime("%Y%m%d")
++            budget_key = self.key + ":requests:" + day
++            count = int(await self.redis.get(budget_key) or 0)
++            if count >= self.settings.remote_daily_request_limit:
++                await self.pause("daily_budget_exhausted")
++                raise RemoteAccessPaused("Daily request budget exhausted; manual review required")
++            # 在发请求前消耗预算；失败也计数，防止认证/超时形成重试风暴。
++            await self.redis.incr(budget_key)
++            await self.redis.expire(budget_key, 172800)
++            await self.redis.set(self.key + ":next-at", str(now + self.settings.remote_min_interval_seconds))
++            lock.ensure_alive()
++            yield
++        finally:
++            await lock.release()
++
++
++@asynccontextmanager
++async def remote_request():
++    """可注入测试替身，但生产路径统一使用 Redis 闸门。"""
++    async with RemoteControl().request():
++        yield
++
++
++async def check_remote_response(status_code: int, retry_after: str | None = None) -> None:
++    if status_code in (401, 403, 429):
++        reason = {401: "authentication_rejected", 403: "access_rejected", 429: "rate_limited"}[status_code]
++        await RemoteControl().pause(reason)
++        # 不根据 Retry-After 自动恢复；人工审查前一直保持暂停。
++        raise RemoteAccessPaused(f"Remote HTTP {status_code}; all external access paused")
+diff --git a/app/core/schema_version.py b/app/core/schema_version.py
+index e849a9c..7eab16f 100644
+--- a/app/core/schema_version.py
++++ b/app/core/schema_version.py
+@@ -3,7 +3,7 @@ from __future__ import annotations
+ from sqlalchemy import text
+ from sqlalchemy.ext.asyncio import AsyncEngine
+ 
+-EXPECTED_SCHEMA_VERSION = 7
++EXPECTED_SCHEMA_VERSION = 8
+ 
+ 
+ class SchemaVersionError(RuntimeError):
+diff --git a/app/main.py b/app/main.py
+index 1df68ff..3a94b40 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
+     logger.info("application_stopped")
+ 
+ 
+-app = FastAPI(title=settings.app_name, version="1.8.0", lifespan=lifespan)
++app = FastAPI(title=settings.app_name, version="1.9.0", lifespan=lifespan)
+ 
+ 
+ @app.middleware("http")
+@@ -71,6 +71,14 @@ async def request_context(request: Request, call_next):
+         request_id_ctx.reset(token)
+ 
+ 
++from app.core.errors import PixivRemoteError
++
++
++@app.exception_handler(PixivRemoteError)
++async def remote_error_handler(request: Request, exc: PixivRemoteError):
++    return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
++
++
+ app.include_router(router)
+ app.include_router(health_router)
+ app.include_router(admin_router)
+diff --git a/app/models/work.py b/app/models/work.py
+index 84db976..4582d3f 100644
+--- a/app/models/work.py
++++ b/app/models/work.py
+@@ -37,6 +37,7 @@ class SyncSourceType(str, enum.Enum):
+     AUTHOR = "author"
+     BOOKMARKS = "bookmarks"
+     WATCHLIST = "watchlist"
++    FOLLOWING = "following"
+ 
+ 
+ class SyncRestrict(str, enum.Enum):
+@@ -222,6 +223,8 @@ class SyncSource(Base):
+         nullable=False,
+         default=21600,
+     )
++    account_id: Mapped[str | None] = mapped_column(String(32))
++    max_items_per_run: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+     frontier_json: Mapped[dict | None] = mapped_column(JSON)
+     next_run_at: Mapped[datetime | None] = mapped_column(DateTime)
+     last_run_at: Mapped[datetime | None] = mapped_column(DateTime)
+@@ -243,6 +246,25 @@ class SyncSource(Base):
+ 
+ 
+ 
++class SyncTarget(Base):
++    """关注作者/追更合集的本地成员快照；取消订阅只置 inactive，不删作品。"""
++    __tablename__ = "sync_targets"
++    source_id: Mapped[int] = mapped_column(
++        BigInteger().with_variant(MYSQL_BIGINT(unsigned=True), "mysql"),
++        ForeignKey("sync_sources.id", ondelete="CASCADE"), primary_key=True,
++    )
++    target_type: Mapped[str] = mapped_column(Enum("author", "novel", "manga"), primary_key=True)
++    remote_id: Mapped[str] = mapped_column(String(32), primary_key=True)
++    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
++    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
++    frontier_json: Mapped[dict | None] = mapped_column(JSON)
++    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
++    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
++    last_success_at: Mapped[datetime | None] = mapped_column(DateTime)
++    last_error: Mapped[str | None] = mapped_column(String(1000))
++    __table_args__ = (Index("idx_sync_targets_due", "source_id", "active", "enabled", "last_checked_at"),)
++
++
+ class WorkSource(Base):
+     __tablename__ = "work_sources"
+     work_id: Mapped[str] = mapped_column(
+diff --git a/app/services/cache_service.py b/app/services/cache_service.py
+index 3e74360..4dbecc1 100644
+--- a/app/services/cache_service.py
++++ b/app/services/cache_service.py
+@@ -17,7 +17,7 @@ from app.core.security import cache_read_allowed
+ from app.core.redis_lock import RenewingRedisLock
+ from app.core.maintenance import require_writes_allowed
+ from app.core.errors import (
+-    PixivAuthError, PixivNotFoundError, PixivRemoteError,
++    RemoteAccessPaused, PixivAuthError, PixivNotFoundError, PixivRemoteError,
+     PixivRestrictedError, PixivUnavailableError,
+ )
+ from app.models.work import (
+@@ -85,6 +85,8 @@ class CacheService:
+ 
+     async def _get(self, pixiv_id: int, work_type: WorkType, refresh: bool, bypass_ttl: bool = False) -> WorkResponse:
+         work = await self._load(pixiv_id, work_type)
++        if not refresh and work is None:
++            raise PixivNotFoundError("No local archive; refresh=false never accesses Pixiv")
+         if work and not refresh:
+             self._require_local_access(work)
+             return self._to_response(work, "local")
+@@ -117,6 +119,8 @@ class CacheService:
+                 return self._to_response(work, "local")
+             try:
+                 snapshot = await self._remote_snapshot(pixiv_id, work_type)
++            except RemoteAccessPaused:
++                raise
+             except PixivNotFoundError as exc:
+                 await self._mark_remote_status(work, WorkStatus.DELETED, str(exc))
+                 raise
